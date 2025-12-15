@@ -1,0 +1,7 @@
+[submodule "firmware"]
+	path = firmware
+	url = https://github.com/pftf/RPi4.git
+[submodule "kernel"]
+	path = kernel
+	url = https://github.com/raspberrypi/linux.git
+	branch = rpi-6.12.y
