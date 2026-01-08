@@ -1,3 +1,6 @@
 [workspace]
 members = ["hasm-openbmc"]
 resolver = "3"
+
+[profile.release]
+debug = 2

@@ -36,9 +36,6 @@ usbd-hid = "0.9.0"
 static_cell = "2"
 chrono = { version = "^0.4", default-features = false}
 
-[profile.release]
-debug = 2
-
 [package.metadata.embassy]
 build = [
   { target = "thumbv7em-none-eabi", artifact-dir = "out/examples/stm32f4" }
