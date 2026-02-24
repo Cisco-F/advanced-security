@@ -349,6 +349,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-net-wiznet"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3035678b1fcb8322bbcc3ee9a32ea3ed04e6e388528057abd11ee8382a63abdf"
+dependencies = [
+ "defmt 1.0.1",
+ "embassy-futures",
+ "embassy-net-driver-channel",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "embassy-stm32"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -670,6 +684,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
+ "embassy-net-wiznet",
  "embassy-stm32",
  "embassy-sync",
  "embassy-time",
