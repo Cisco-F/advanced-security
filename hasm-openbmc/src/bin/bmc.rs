@@ -35,22 +35,19 @@
 #![no_std]
 #![no_main]
 
+use core::net::Ipv4Addr;
+
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_net::StackResources;
+use embassy_net::{Ipv4Cidr, StackResources, Ipv4Address, StaticConfigV4};
 use embassy_stm32::{
-    bind_interrupts, eth,
-    // 【修正1】根据编译器提示，将 GenericSMI 替换为 GenericPhy
-    eth::{GenericPhy, Ethernet, PacketQueue},
-    gpio::{Level, Output, Speed},
-    peripherals::ETH,
-    time::Hertz,
-    Config,
+    Config, bind_interrupts, eth::{self, Ethernet, GenericPhy, PacketQueue}, gpio::{Level, Output, Speed}, i2c::Address, peripherals::ETH, time::Hertz
 };
 use embassy_stm32::rcc::*;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 // 【优化】移除了未使用的 Timer 引用
 use embassy_time::Duration;
+use heapless::Vec;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -90,12 +87,12 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     {
         config.rcc.hse = Some(Hse {
-            freq: Hertz(8_000_000), 
+            freq: Hertz(25_000_000), 
             mode: HseMode::Oscillator,
         });
         config.rcc.pll_src = PllSource::HSE;
         config.rcc.pll = Some(Pll {
-            prediv: PllPreDiv::DIV8,
+            prediv: PllPreDiv::DIV25,
             mul: PllMul::MUL336,
             divp: Some(PllPDiv::DIV2), // 168MHz
             divq: Some(PllQDiv::DIV7),
@@ -108,6 +105,7 @@ async fn main(spawner: Spawner) {
         config.rcc.apb2_pre = APBPrescaler::DIV2;
     }
     let p = embassy_stm32::init(config);
+    // let p = embassy_stm32::init(Default::default());
 
     info!("BMC Init...");
 
@@ -137,9 +135,27 @@ async fn main(spawner: Spawner) {
         mac_addr,
     );
 
+    // 使用静态ip
+    // 设置ip
+    let address = Ipv4Address::new(192, 168, 1, 177);
+    let cidr = Ipv4Cidr::new(address, 24);
+
+    // 设置网关
+    let gateway = Ipv4Address::new(192, 168, 1, 1);
+
+    // 设置dns服务器（这里留空）
+    let dns_servers: Vec<Ipv4Address, 3> = Vec::new();
+
+    let static_config = StaticConfigV4 {
+        address: cidr,
+        gateway: Some(gateway),
+        dns_servers: dns_servers,
+    };
+    let config = embassy_net::Config::ipv4_static(static_config);
+
     let (stack, net_runner) = embassy_net::new(
         device,
-        embassy_net::Config::dhcpv4(Default::default()),
+        config,
         NET_RESOURCES.init(StackResources::new()),
         0x1234_5678,
     );
@@ -147,11 +163,22 @@ async fn main(spawner: Spawner) {
     spawner.spawn(net_task(net_runner)).unwrap();
     spawner.spawn(led_task(led)).unwrap();
 
-    info!("Waiting for DHCP...");
+    info!("network initialized using static ip: {}", address);
     stack.wait_config_up().await;
+
     let ip = stack.config_v4().unwrap().address;
     info!("IP Address: {}", ip);
     info!("Try: curl -X POST http://{}/redfish/v1/Systems/1/Actions/ComputerSystem.Reset -d '{{\"ResetType\":\"On\"}}'", ip);
+
+    loop {
+        if stack.is_link_up() {
+            info!("LINK UP");
+            break;
+        } else {
+            warn!("LINK DOWN");
+        }
+        embassy_time::Timer::after_secs(1).await;
+    }
 
     // ── HTTP Server Loop ──
     let mut rx_buf = [0u8; 1024];
