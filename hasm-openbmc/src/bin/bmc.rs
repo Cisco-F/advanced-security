@@ -168,7 +168,7 @@ async fn main(spawner: Spawner) {
 
     let ip = stack.config_v4().unwrap().address;
     info!("IP Address: {}", ip);
-    info!("Try: curl -X POST http://{}/redfish/v1/Systems/1/Actions/ComputerSystem.Reset -d '{{\"ResetType\":\"On\"}}'", ip);
+    info!("Try: curl -X POST http://{}/redfish/v1/Systems/1/Actions/ComputerSystem.Reset -d '{{\"PowerOn\"}}'", ip.address());
 
     loop {
         if stack.is_link_up() {
@@ -209,11 +209,11 @@ async fn handle_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
                 filled += n;
                 if buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
                     // 尝试读取剩余 body
-                    if filled < buf.len() {
-                         if let Ok(extra) = socket.read(&mut buf[filled..]).await {
-                            filled += extra;
-                         }
-                    }
+                    // if filled < buf.len() {
+                    //      if let Ok(extra) = socket.read(&mut buf[filled..]).await {
+                    //         filled += extra;
+                    //      }
+                    // }
                     break 'read;
                 }
                 if filled >= buf.len() { break 'read; }
@@ -224,10 +224,10 @@ async fn handle_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
     let req_str = core::str::from_utf8(&buf[..filled]).unwrap_or("");
     
     if req_str.starts_with("POST /redfish/v1/Systems/1/Actions/ComputerSystem.Reset") {
-        if req_str.contains("\"ResetType\":\"On\"") || req_str.contains("\"ResetType\": \"On\"") {
+        if req_str.contains("PowerOn") {
             POWER_SIGNAL.signal(true);
             send_response(socket, 204, b"No Content", b"").await;
-        } else if req_str.contains("ForceOff") || req_str.contains("GracefulShutdown") {
+        } else if req_str.contains("PowerOff") {
             POWER_SIGNAL.signal(false);
             send_response(socket, 204, b"No Content", b"").await;
         } else {
