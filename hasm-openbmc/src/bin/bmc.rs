@@ -35,17 +35,14 @@
 #![no_std]
 #![no_main]
 
-use core::net::Ipv4Addr;
-
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::{Ipv4Cidr, StackResources, Ipv4Address, StaticConfigV4};
 use embassy_stm32::{
-    Config, bind_interrupts, eth::{self, Ethernet, GenericPhy, PacketQueue}, gpio::{Level, Output, Speed}, i2c::Address, peripherals::ETH, time::Hertz
+    Config, bind_interrupts, eth::{self, Ethernet, GenericPhy, PacketQueue}, gpio::{Level, Output, Speed}, peripherals::ETH, time::Hertz
 };
 use embassy_stm32::rcc::*;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
-// 【优化】移除了未使用的 Timer 引用
 use embassy_time::Duration;
 use heapless::Vec;
 use static_cell::StaticCell;
@@ -55,7 +52,6 @@ bind_interrupts!(struct Irqs {
     ETH => eth::InterruptHandler;
 });
 
-// 【修正2】类型别名中也更新为 GenericPhy
 type Device = Ethernet<'static, ETH, GenericPhy>;
 
 static POWER_SIGNAL: Signal<ThreadModeRawMutex, bool> = Signal::new();
@@ -98,14 +94,12 @@ async fn main(spawner: Spawner) {
             divq: Some(PllQDiv::DIV7),
             divr: None,
         });
-        // 【修正3】STM32F4 的 PLL 系统时钟枚举变更为 Pll1_P (注意下划线)
         config.rcc.sys = Sysclk::PLL1_P; 
         config.rcc.ahb_pre = AHBPrescaler::DIV1;
         config.rcc.apb1_pre = APBPrescaler::DIV4;
         config.rcc.apb2_pre = APBPrescaler::DIV2;
     }
     let p = embassy_stm32::init(config);
-    // let p = embassy_stm32::init(Default::default());
 
     info!("BMC Init...");
 
@@ -116,7 +110,6 @@ async fn main(spawner: Spawner) {
     let mac_addr = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
     // 4. 以太网初始化
-    // 这里的引脚保持你之前设置的正确参数
     let device = Ethernet::new(
         PACKETS.init(PacketQueue::<4, 4>::new()),
         p.ETH,
@@ -137,11 +130,11 @@ async fn main(spawner: Spawner) {
 
     // 使用静态ip
     // 设置ip
-    let address = Ipv4Address::new(192, 168, 1, 177);
+    let address = Ipv4Address::new(192, 168, 2, 177);
     let cidr = Ipv4Cidr::new(address, 24);
 
     // 设置网关
-    let gateway = Ipv4Address::new(192, 168, 1, 1);
+    let gateway = Ipv4Address::new(192, 168, 2, 1);
 
     // 设置dns服务器（这里留空）
     let dns_servers: Vec<Ipv4Address, 3> = Vec::new();
@@ -208,12 +201,6 @@ async fn handle_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
             Ok(n) => {
                 filled += n;
                 if buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
-                    // 尝试读取剩余 body
-                    // if filled < buf.len() {
-                    //      if let Ok(extra) = socket.read(&mut buf[filled..]).await {
-                    //         filled += extra;
-                    //      }
-                    // }
                     break 'read;
                 }
                 if filled >= buf.len() { break 'read; }
@@ -222,23 +209,50 @@ async fn handle_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
     }
 
     let req_str = core::str::from_utf8(&buf[..filled]).unwrap_or("");
-    
-    if req_str.starts_with("POST /redfish/v1/Systems/1/Actions/ComputerSystem.Reset") {
-        if req_str.contains("PowerOn") {
-            POWER_SIGNAL.signal(true);
-            send_response(socket, 204, b"No Content", b"").await;
-        } else if req_str.contains("PowerOff") {
-            POWER_SIGNAL.signal(false);
-            send_response(socket, 204, b"No Content", b"").await;
-        } else {
-            send_response(socket, 400, b"Bad Request", b"{\"error\": \"Unknown ResetType\"}").await;
-        }
-    } else if req_str.starts_with("GET /redfish/v1") {
-        let body = b"{\"@odata.id\":\"/redfish/v1\",\"Systems\":{\"@odata.id\":\"/redfish/v1/Systems\"}}";
-        send_response(socket, 200, b"OK", body).await;
-    } else {
-        send_response(socket, 404, b"Not Found", b"").await;
+    let mut method = "";
+    let mut path = "";
+    if let Some(line) = req_str.lines().next() {
+        let mut parts = line.split_whitespace();
+        method = parts.next().unwrap_or("");
+        path = parts.next().unwrap_or("");
     }
+
+    match (method, path) {
+        // health check
+        ("GET", "/ping") => {
+            send_response(socket, 200, b"OK", b"connection up!").await;
+        }
+        // Redfish root
+        ("GET", "/redfish/v1") => {
+            send_response(socket, 200, b"OK", ROOT_RESOURCE.as_bytes()).await;
+        }
+        // Redfish Systems collection
+        ("GET", "/redfish/v1/Systems") => {
+            send_response(socket, 200, b"OK", SYSTEM_RESOURCE.as_bytes()).await;
+        }
+        // Redfish Systems, return power state
+        ("GET", "/redfish/v1/Systems/1") => {
+            send_response(socket, 200, b"OK", dump_system_info("1").await.as_bytes()).await;
+        }
+        // power control
+        ("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset") => {
+            if req_str.contains("\"ResetType\":\"On\"") {
+                POWER_SIGNAL.signal(true);
+                send_response(socket, 200, b"OK", b"Power On!").await;
+            } else if req_str.contains("\"ResetType\":\"ForceOff\"") {
+                POWER_SIGNAL.signal(false);
+                send_response(socket, 200, b"OK", b"Force Power Off!").await;
+            } else {
+                send_response(socket, 404, b"Not Found", b"").await;
+            }
+        }
+
+        _ => {
+            send_response(socket, 404, b"Not Found", b"").await;
+        }
+    }
+    
+    // Responses are handled in the match above; avoid duplicate handling here.
 
     let _ = socket.flush().await;
     socket.close();
@@ -276,4 +290,49 @@ fn itoa(mut n: u16, buf: &mut [u8]) -> &[u8] {
     let slice = &mut buf[..i];
     slice.reverse();
     slice
+}
+
+static ROOT_RESOURCE: &str = r##"{
+    "@odata.type": "#ServiceRoot.v1_15_0.ServiceRoot",
+    "@odata.id": "/redfish/v1",
+    "@odata.context": "/redfish/v1/$metadata#ServiceRoot.ServiceRoot",
+    "Id": "RootService",
+    "Name": "Root Service",
+    "RedfishVersion": "1.13.0",
+    "Systems": {
+        "@odata.id": "/redfish/v1/Systems"
+    },
+    "Chassis": {
+        "@odata.id": "/redfish/v1/Chassis"
+    },
+    "Managers": {
+        "@odata.id": "/redfish/v1/Managers"
+    }
+}"##;
+
+static SYSTEM_RESOURCE: &str = r##"{
+  "@odata.id": "/redfish/v1/Systems",
+  "Members": [
+    { "@odata.id": "/redfish/v1/Systems/1" }
+  ],
+  "Members@odata.count": 1
+}"##;
+
+async fn dump_system_info(_system_id: &str) -> &'static str {
+    r##"{
+        "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
+        "@odata.id": "/redfish/v1/Systems/1",
+        "Id": "1",
+        "Name": "Main System",
+        "PowerState": "On",
+        "Actions": {
+            "#ComputerSystem.Reset": {
+                "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset",
+                "ResetType@Redfish.AllowableValues": [
+                    "On",
+                    "ForceOff",
+                ]
+            }
+        }
+    }"##
 }
