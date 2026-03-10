@@ -3,7 +3,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_net::{StackResources, Config, Ipv4Address, StaticConfigV4, Ipv4Cidr};
+use embassy_net::{StackResources, Ipv4Address, StaticConfigV4, Ipv4Cidr};
 use embassy_stm32::{
     bind_interrupts,
     eth::{self, Ethernet, GenericPhy, PacketQueue},
