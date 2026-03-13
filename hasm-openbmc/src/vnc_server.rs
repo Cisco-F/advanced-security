@@ -1,157 +1,41 @@
-#![no_std]
-#![no_main]
-
-use embassy_executor::Spawner;
-use embassy_net::tcp::TcpSocket;
-use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
-use embassy_stm32::eth::{Ethernet, GenericPhy, PacketQueue};
-use embassy_stm32::peripherals::ETH;
-use embassy_stm32::time::Hertz;
-use embassy_stm32::Config as StmConfig;
-use embassy_stm32::rcc::*;
-use embassy_time::{Duration, Timer};
+use embassy_net::{Stack, tcp::TcpSocket};
 use embedded_io_async::{Read, Write};
-use defmt::{info, warn, error};
-use heapless::Vec;
+use defmt::{info, warn};
 use {defmt_rtt as _, panic_probe as _};
 
-embassy_stm32::bind_interrupts!(struct Irqs {
-    ETH => embassy_stm32::eth::InterruptHandler;
-});
-static PACKETS: static_cell::StaticCell<PacketQueue<4, 4>> = static_cell::StaticCell::new();
-static RESOURCES: static_cell::StaticCell<StackResources<2>> = static_cell::StaticCell::new();
+const SCREEN_WIDTH: u16 = 200;
+const SCREEN_HEIGHT: u16 = 200; 
 
 #[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH, GenericPhy>>) -> ! {
-    runner.run().await
-}
-
-const SCREEN_WIDTH: u16 = 200;
-const SCREEN_HEIGHT: u16 = 200;
-
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let mut config = StmConfig::default();
-    {
-        config.rcc.hse = Some(Hse {
-            freq: Hertz(25_000_000),
-            mode: HseMode::Oscillator,
-        });
-        config.rcc.pll_src = PllSource::HSE;
-        config.rcc.pll = Some(Pll {
-            prediv: PllPreDiv::DIV25,
-            mul: PllMul::MUL336,
-            divp: Some(PllPDiv::DIV2), 
-            divq: Some(PllQDiv::DIV7),
-            divr: None,
-        });
-        config.rcc.sys = Sysclk::PLL1_P;
-        config.rcc.ahb_pre = AHBPrescaler::DIV1;
-        config.rcc.apb1_pre = APBPrescaler::DIV4;
-        config.rcc.apb2_pre = APBPrescaler::DIV2;
-    }
-    let p = embassy_stm32::init(config);
-    info!("Board Initialization ok");
-
-    let mac =[0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-    let device = Ethernet::new(
-        PACKETS.init(PacketQueue::new()),
-        p.ETH, 
-        Irqs,
-        p.PA1,
-        p.PA2, 
-        p.PC1, 
-        p.PA7, 
-        p.PC4, 
-        p.PC5, 
-        p.PG13, 
-        p.PG14, 
-        p.PG11,
-        GenericPhy::new(0), 
-        mac,
-    );
-
-    let address = Ipv4Address::new(192, 168, 1, 177); 
-    let cidr = Ipv4Cidr::new(address, 24);
-    let gateway = Ipv4Address::new(192, 168, 1, 77);  
-    let dns_servers: Vec<Ipv4Address, 3> = Vec::new();
-
-    let static_config = StaticConfigV4 {
-        address: cidr,
-        gateway: Some(gateway),
-        dns_servers,
-    };
-    let config = embassy_net::Config::ipv4_static(static_config);
-
-    let (stack, runner) = embassy_net::new(
-        device, config, RESOURCES.init(StackResources::new()), 0x12345678,
-    );
-    spawner.spawn(net_task(runner)).unwrap();
-
-    info!("Waiting for network link...");
-    while !stack.is_link_up() {
-        Timer::after(Duration::from_millis(500)).await;
-    }
-    info!("Network link is UP! IP Address ready.");
-
-    // [修复] 加大缓冲区，一帧画面很大，1024 容易塞满阻塞降低帧率甚至超时
-    let mut rx_buffer = [0; 4096]; 
-    let mut tx_buffer =[0; 4096];
+pub async fn vnc_task(stack: Stack<'static>) {
+    let mut rx_buffer = [0u8; 4096];
+    let mut tx_buffer = [0u8; 4096];
 
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        info!("VNC Server waiting for connection on 192.168.1.177:5900 ...");
-        
+        info!("VNC server listening on port {}:·5900...", stack.config_v4().unwrap().address);
         if let Err(e) = socket.accept(5900).await {
-            error!("Accept error => {:?}", e);
+            warn!("Accept error: {:?}", e);
             continue;
         }
 
-        info!("Client Connected! Endpoint: {:?}", socket.remote_endpoint());
-
-        match handle_vnc_session(&mut socket).await {
-            Ok(_) => info!("VNC session gracefully closed"),
-            Err(_) => warn!("VNC session error/aborted"),
-        }
-        
-        socket.abort();
-        info!("Socket closed. Ready for next connection.");
-        Timer::after(Duration::from_millis(500)).await;
+        handle_vnc_session(&mut socket).await;
     }
 }
 
-fn generate_gradient_pixel(x: u16, y: u16) -> [u8; 3] {
-    let hue = ((x as u32 + y as u32) * 360 / (SCREEN_WIDTH as u32 + SCREEN_HEIGHT as u32)) as u16;
-    let sat = 255;
-    let val = 200;
-    
-    let h = (hue / 60) % 6;
-    let c = ((val as u32 * sat as u32) / 255) as u8;
-    let x_val = (c as u32 * (60 - ((hue % 60) as u32))) / 60;
-    
-    match h {
-        0 => [c, x_val as u8, 0],
-        1 => [x_val as u8, c, 0],
-        2 =>[0, c, x_val as u8],
-        3 => [0, x_val as u8, c],
-        4 => [x_val as u8, 0, c],
-        _ =>[c, 0, x_val as u8],
-    }
-}
-
-async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
-    socket.write_all(b"RFB 003.008\n").await.map_err(|_| ())?;
+pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
+    let _ = socket.write_all(b"RFB 003.008\n").await;
     let mut client_version = [0u8; 12];
-    socket.read_exact(&mut client_version).await.map_err(|_| ())?;
+    let _ = socket.read_exact(&mut client_version).await;
 
-    socket.write_all(&[1, 1]).await.map_err(|_| ())?;
+    let _ = socket.write_all(&[1, 1]).await;
     let mut sec_type =[0u8; 1];
-    socket.read_exact(&mut sec_type).await.map_err(|_| ())?;
-    if sec_type[0] != 1 { return Err(()); }
-    socket.write_all(&[0, 0, 0, 0]).await.map_err(|_| ())?;
+    let _ = socket.read_exact(&mut sec_type).await;
+    if sec_type[0] != 1 { return; }
+    let _ = socket.write_all(&[0, 0, 0, 0]).await;
 
     let mut client_init = [0u8; 1];
-    socket.read_exact(&mut client_init).await.map_err(|_| ())?;
+    let _ = socket.read_exact(&mut client_init).await;
 
     let mut server_init =[0u8; 32];
     server_init[0..2].copy_from_slice(&SCREEN_WIDTH.to_be_bytes());
@@ -172,7 +56,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
     server_init[20..24].copy_from_slice(&(8u32).to_be_bytes());
     server_init[24..32].copy_from_slice(b"STM32VNC");
     
-    socket.write_all(&server_init).await.map_err(|_| ())?;
+    let _ = socket.write_all(&server_init).await;
     info!("✓ Server Init Sent. Entering Event Loop!");
 
     // [修复] 保存客户端实际请求的像素位数，避免客户端按其它格式解析而崩溃
@@ -182,7 +66,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
         let mut msg_type = [0u8; 1];
         if socket.read_exact(&mut msg_type).await.is_err() {
             warn!("⚠️  Failed to read message type, connection lost");
-            return Err(());
+            return;
         }
 
         match msg_type[0] {
@@ -194,7 +78,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                         current_bpp = payload[4]; // 更新为客户端想要的 bit-per-pixel
                         info!("[VNC] SetPixelFormat, client requested: {} bpp", current_bpp);
                     }
-                    Err(_) => return Err(()),
+                    Err(_) => return,
                 }
             },
             // 设置编码格式
@@ -205,10 +89,10 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                         let num = u16::from_be_bytes([header[1], header[2]]);
                         for _ in 0..num {
                             let mut enc_data = [0u8; 4];
-                            socket.read_exact(&mut enc_data).await.map_err(|_| ())?;
+                            let _ = socket.read_exact(&mut enc_data).await;
                         }
                     }
-                    Err(_) => return Err(()),
+                    Err(_) => return,
                 }
             },
             // 客户端请求刷新画面
@@ -216,7 +100,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                 let mut payload = [0u8; 9];
                 if socket.read_exact(&mut payload).await.is_err() {
                     warn!("⚠️ Failed to read FB Request payload");
-                    return Err(());
+                    return;
                 }
                 
                 let _inc = payload[0];
@@ -245,7 +129,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                 header[8..10].copy_from_slice(&(width).to_be_bytes());
                 header[10..12].copy_from_slice(&(height).to_be_bytes());
                 header[12..16].copy_from_slice(&(0i32).to_be_bytes()); // Raw
-                socket.write_all(&header).await.map_err(|_| ())?;
+                let _ = socket.write_all(&header).await;
                 
                 let bytes_per_pixel = ((current_bpp / 8) as usize).max(1);
                 // 声明单行缓冲区，200 宽 * 4 bytes = 800 bytes，完全不会撑爆 STM32 的栈
@@ -271,7 +155,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                             line[i] = g; // 随便给个灰色防崩溃
                         }
                     }
-                    socket.write_all(&line[..(width as usize * bytes_per_pixel)]).await.map_err(|_| ())?;
+                    let _ = socket.write_all(&line[..(width as usize * bytes_per_pixel)]).await;
                 }
             },
             // 键盘事件
@@ -285,7 +169,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                     }
                     Err(_) => {
                         warn!("⚠️  Failed to read KeyEvent payload");
-                        return Err(());
+                        return;
                     }
                 }
             },
@@ -311,14 +195,14 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                     }
                     Err(_) => {
                         warn!("⚠️  Failed to read PointerEvent payload");
-                        return Err(());
+                        return;
                     }
                 }
             },
             // 读取剪贴板
             6 => {
                 let mut h = [0u8; 7];
-                socket.read_exact(&mut h).await.map_err(|_|())?;
+                let _ = socket.read_exact(&mut h).await;
                 let len = u32::from_be_bytes([h[3], h[4], h[5], h[6]]);
                 for _ in 0..len {
                     let mut b = [0u8; 1];
@@ -327,8 +211,28 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
             },
             _ => {
                 warn!("⚠️  Unknown message type: {} (0x{:02x}), treating as error", msg_type[0], msg_type[0]);
-                return Err(());
+                return;
             }
         }
     }
 }
+
+fn generate_gradient_pixel(x: u16, y: u16) -> [u8; 3] {
+    let hue = ((x as u32 + y as u32) * 360 / (SCREEN_WIDTH as u32 + SCREEN_HEIGHT as u32)) as u16;
+    let sat = 255;
+    let val = 200;
+    
+    let h = (hue / 60) % 6;
+    let c = ((val as u32 * sat as u32) / 255) as u8;
+    let x_val = (c as u32 * (60 - ((hue % 60) as u32))) / 60;
+    
+    match h {
+        0 => [c, x_val as u8, 0],
+        1 => [x_val as u8, c, 0],
+        2 =>[0, c, x_val as u8],
+        3 => [0, x_val as u8, c],
+        4 => [x_val as u8, 0, c],
+        _ =>[c, 0, x_val as u8],
+    }
+}
+
