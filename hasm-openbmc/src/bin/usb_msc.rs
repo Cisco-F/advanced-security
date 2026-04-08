@@ -12,121 +12,23 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::{Config as UsbConfig, Driver};
 use embassy_stm32::{bind_interrupts, peripherals, usb};
 use embassy_time::Timer;
-use embassy_usb::{Builder, UsbDevice};
+use embassy_usb::Builder;
 use embassy_usb::driver::{EndpointIn, EndpointOut};
 use panic_probe as _;
+
+use hasm_openbmc::scsi::*;
+
+static EP_OUT_BUFFER: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
+static CONFIG_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
+static BOS_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
+static CTRL_BUF: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
 
 bind_interrupts!(struct Irqs {
     OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
 });
 
-macro_rules! make_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        STATIC_CELL.init($val)
-    }};
-}
-
-// ============= SCSI 命令代码 =============
-const SCSI_TEST_UNIT_READY: u8 = 0x00;
-const SCSI_REQUEST_SENSE: u8 = 0x03;
-const SCSI_INQUIRY: u8 = 0x12;
-const SCSI_MODE_SENSE_6: u8 = 0x1A;
-const SCSI_READ_FORMAT_CAPACITIES: u8 = 0x23;
-const SCSI_READ_CAPACITY_10: u8 = 0x25;
-const SCSI_READ_10: u8 = 0x28;
-
-// ============= MSC 常量 =============
-const CBW_SIGNATURE: u32 = 0x4342_5355; // "USBC"
-const CSW_SIGNATURE: u32 = 0x5342_5355; // "USBS"
-const SECTOR_SIZE: u32 = 512;
-const VIRTUAL_SECTOR_COUNT: u32 = 8192;
-
-fn handle_scsi_command(
-    cmd: &[u8],
-    data_buf: &mut [u8],
-) -> (u8, u32, usize) {
-    if cmd.is_empty() { return (1, 0, 0); }
-    match cmd[0] {
-        SCSI_TEST_UNIT_READY => {
-            (0, 0, 0)
-        }
-        SCSI_REQUEST_SENSE => {
-            let mut sense = [0u8; 18];
-            sense[0] = 0x70; sense[2] = 0x00; sense[7] = 10;
-            let len = core::cmp::min(sense.len(), data_buf.len());
-            data_buf[..len].copy_from_slice(&sense[..len]);
-            (0, (sense.len() as u32).saturating_sub(len as u32), len)
-        }
-        SCSI_INQUIRY => {
-            info!("→ INQUIRY");
-            let mut resp = [0u8; 36];
-            resp[0] = 0x00; resp[1] = 0x80; resp[2] = 0x02; resp[3] = 0x02; resp[4] = 31;
-            resp[8..16].copy_from_slice(b"MyBMC   ");
-            resp[16..32].copy_from_slice(b"STM32 VirtualUSB"); // 名字可以随便取
-            resp[32..36].copy_from_slice(b"1.00");
-            
-            let len = core::cmp::min(resp.len(), data_buf.len());
-            data_buf[..len].copy_from_slice(&resp[..len]);
-            (0, (resp.len() as u32).saturating_sub(len as u32), len)
-        }
-         SCSI_MODE_SENSE_6 => {
-            info!("→ MODE_SENSE_6 0x1A");
-            let mut resp = [0u8; 4];
-            resp[0] = 0x03; // 长度
-            resp[1] = 0x00; // 介质类型标准
-            resp[2] = 0x00; // 没开启写保护 (如果要伪装成只读光驱，这里改成 0x80)
-            resp[3] = 0x00; // 块描述符长度
-            
-            let len = core::cmp::min(resp.len(), data_buf.len());
-            data_buf[..len].copy_from_slice(&resp[..len]);
-            (0, (resp.len() as u32).saturating_sub(len as u32), len)
-        }
-        SCSI_READ_FORMAT_CAPACITIES => {
-            info!("→ READ_FORMAT_CAPACITIES 0x23");
-            let mut resp = [0u8; 12];
-            resp[3] = 0x08; // 列表长度是 8
-            resp[4..8].copy_from_slice(&VIRTUAL_SECTOR_COUNT.to_be_bytes()); // 容量
-            resp[8] = 0x02; // Formatted Media 表明设备已经可用
-            
-            let block_len = SECTOR_SIZE.to_be_bytes();
-            resp[9] = block_len[1]; resp[10] = block_len[2]; resp[11] = block_len[3];
-            
-            let len = core::cmp::min(resp.len(), data_buf.len());
-            data_buf[..len].copy_from_slice(&resp[..len]);
-            (0, (resp.len() as u32).saturating_sub(len as u32), len)
-        }
-        SCSI_READ_CAPACITY_10 => {
-            info!("→ READ_CAPACITY_10 0x25");
-            let mut resp = [0u8; 8];
-            let last_lba = VIRTUAL_SECTOR_COUNT - 1;
-            resp[0..4].copy_from_slice(&last_lba.to_be_bytes());
-            resp[4..8].copy_from_slice(&SECTOR_SIZE.to_be_bytes());
-            
-            let len = core::cmp::min(resp.len(), data_buf.len());
-            data_buf[..len].copy_from_slice(&resp[..len]);
-            (0, (resp.len() as u32).saturating_sub(len as u32), len)
-        }
-        SCSI_READ_10 => {
-            let lba = u32::from_be_bytes([cmd[2], cmd[3], cmd[4], cmd[5]]);
-            let num_blocks = u16::from_be_bytes([cmd[7], cmd[8]]) as u32;
-            let total_bytes = (num_blocks * SECTOR_SIZE) as usize;
-            
-            info!("→ READ_10 LBA={}, Blocks={}", lba, num_blocks);
-            
-            // 注意：我们直接返回 total_bytes，不再受制于 data_buf 的大小！
-            // 因为如果是 READ_10，我们会在 main 循环里特殊处理，不再读取 data_buf！
-            (0, 0, total_bytes)
-        }
-        _ => {
-            warn!("Unknown SCSI: 0x{:02x}", cmd[0]);
-            (1, 0, 0) // 其他不想处理的指令，直接报错骗过主机
-        }
-    }
-}
-
 #[embassy_executor::task]
-async fn usb_task(mut usb: UsbDevice<'static, Driver<'static, peripherals::USB_OTG_FS>>) {
+async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, peripherals::USB_OTG_FS>>) {
     usb.run().await;
 }
 
@@ -155,14 +57,21 @@ async fn main(spawner: Spawner) {
     info!("✓ Clock init");
 
     // USB 配置
-    let ep_out_buffer = make_static!([u8; 256], [0; 256]);
+    let ep_out_buffer = EP_OUT_BUFFER.init([0; 256]);
     let mut usb_cfg = UsbConfig::default();
     usb_cfg.vbus_detection = false;
-    let driver = Driver::new_fs(p.USB_OTG_FS, Irqs, p.PA12, p.PA11, ep_out_buffer, usb_cfg);
+    let driver = Driver::new_fs(
+        p.USB_OTG_FS, 
+        Irqs, 
+        p.PA12, 
+        p.PA11, 
+        ep_out_buffer, 
+        usb_cfg
+    );
 
-    let config_desc = make_static!([u8; 256], [0; 256]);
-    let bos_desc = make_static!([u8; 256], [0; 256]);
-    let ctrl_buf = make_static!([u8; 64], [0; 64]);
+    let config_desc = CONFIG_DESC.init([0; 256]);
+    let bos_desc = BOS_DESC.init([0; 256]);
+    let ctrl_buf = CTRL_BUF.init([0; 64]);
 
     let mut cfg = embassy_usb::Config::new(0xc0de, 0xcafe);
     cfg.manufacturer = Some("MyBMC");
@@ -185,8 +94,6 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(usb_task(usb)));
 
     info!("✓ USB MSC device ready!");
-    info!("✓ MSC bulk endpoints configured");
-    info!("✓ Should enumerate as {}MB USB drive", VIRTUAL_SECTOR_COUNT / 2);
 
     let mut cbw_buf = [0u8; 31];
     
@@ -219,12 +126,11 @@ async fn main(spawner: Spawner) {
         let flags = cbw_buf[12];
         let cb_len = core::cmp::min(cbw_buf[14] as usize, 16);
         let cmd = &cbw_buf[15..15 + cb_len];
+        let mut response = handle_scsi_cmd(cmd, &mut data_buf);
 
-        let (status, mut residue, resp_len) = handle_scsi_command(cmd, &mut data_buf);
-
-        if (flags & 0x80) != 0 && dtl > 0 && resp_len > 0 {
+        if (flags & 0x80) != 0 && dtl > 0 && response.resp_len > 0 {
             // 需要发送的总长度
-            let send_len = core::cmp::min(resp_len, dtl as usize);
+            let send_len = core::cmp::min(response.resp_len, dtl as usize);
             let mut offset = 0;
             let mut write_ok = true;
             
@@ -242,7 +148,7 @@ async fn main(spawner: Spawner) {
                 };
                 if let Err(e) = ep_in.write(chunk_data).await {
                     warn!("MSC IN write chunk error: {:?}", e);
-                    residue = dtl.saturating_sub(offset as u32);
+                    response.residue = dtl.saturating_sub(offset as u32);
                     write_ok = false;
                     break;
                 }
@@ -250,23 +156,22 @@ async fn main(spawner: Spawner) {
             }
             
             if write_ok && (send_len as u32) < dtl {
-                residue = dtl - (send_len as u32);
+                response.residue = dtl - (send_len as u32);
             }
         } else if dtl > 0 {
             // 如果主机想往 U 盘【写入】数据（WRITE_10等），
             // 当前我们因为是虚拟空白盘，直接忽略写入数据就行，或者清空调缓冲（不造成卡顿）
-            residue = dtl;
+            response.residue = dtl;
         }
 
         let mut csw = [0u8; 13];
         csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
         csw[4..8].copy_from_slice(&tag.to_le_bytes());
-        csw[8..12].copy_from_slice(&residue.to_le_bytes());
-        csw[12] = status;
+        csw[8..12].copy_from_slice(&response.residue.to_le_bytes());
+        csw[12] = response.status as u8;
 
         if let Err(e) = ep_in.write(&csw).await {
             warn!("MSC CSW write error: {:?}", e);
         }
     }
 }
-
