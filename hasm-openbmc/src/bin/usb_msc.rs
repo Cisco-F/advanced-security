@@ -14,6 +14,7 @@ use embassy_stm32::{bind_interrupts, peripherals, usb};
 use embassy_time::Timer;
 use embassy_usb::Builder;
 use embassy_usb::driver::{EndpointIn, EndpointOut};
+use hasm_openbmc::scsi::cmd::BOOT_SECTOR;
 use panic_probe as _;
 
 use hasm_openbmc::scsi::*;
@@ -133,19 +134,37 @@ async fn main(spawner: Spawner) {
             let send_len = core::cmp::min(response.resp_len, dtl as usize);
             let mut offset = 0;
             let mut write_ok = true;
-            
-            // 准备一个 64 字节的水瓢 (全零)
-            let zero_chunk = [0u8; 64];
+
             while offset < send_len {
                 let chunk_size = core::cmp::min(send_len - offset, 64);
-                
-                // 【核心魔法】：如果是读硬盘指令，我们就用全 0 水瓢泼给它！
-                // 如果是其他指令(如 INQUIRY 元数据)，才去读 data_buf 里真实的配置数据。
+
+                // let chunk_data = &data_buf[offset..offset + chunk_size];
+
+                // if let Err(e) = ep_in.write(chunk_data).await {
+                //     error!("MSC IN write chunk error: {:?}", e);
+                //     response.residue = dtl.saturating_sub(offset as u32);
+                //     write_ok = false;
+                //     break;
+                // }
+
+                // offset += chunk_size;
+
+                let lba = u32::from_be_bytes([cmd[2], cmd[3], cmd[4], cmd[5]]);
                 let chunk_data = if cmd[0] == SCSI_READ_10 {
-                    &zero_chunk[..chunk_size]
+                    let abs_offset = (lba * SECTOR_SIZE) + (offset as u32);
+                    let cur_sector = abs_offset / SECTOR_SIZE;
+                    let sector_offset = abs_offset % SECTOR_SIZE;   
+
+                    if cur_sector == 0 {
+                        &BOOT_SECTOR[sector_offset as usize..(sector_offset as usize) + chunk_size]
+                    } else {
+                        static ZERO_BUF: [u8; 512] = [0; 512];
+                        &ZERO_BUF[(sector_offset as usize)..(sector_offset as usize) + chunk_size]
+                    }
                 } else {
-                    &data_buf[offset..offset + chunk_size]
+                    &data_buf[offset .. offset + chunk_size]
                 };
+
                 if let Err(e) = ep_in.write(chunk_data).await {
                     warn!("MSC IN write chunk error: {:?}", e);
                     response.residue = dtl.saturating_sub(offset as u32);
@@ -154,14 +173,32 @@ async fn main(spawner: Spawner) {
                 }
                 offset += chunk_size;
             }
-            
+
             if write_ok && (send_len as u32) < dtl {
-                response.residue = dtl - (send_len as u32);
+                // 如果我们发送的数据比主机预期的还少，说明主机多余的数据我们无法处理了，直接把剩余的都标记为未处理（residue）
+                response.residue = dtl.saturating_sub(send_len as u32);
             }
+                
         } else if dtl > 0 {
-            // 如果主机想往 U 盘【写入】数据（WRITE_10等），
-            // 当前我们因为是虚拟空白盘，直接忽略写入数据就行，或者清空调缓冲（不造成卡顿）
-            response.residue = dtl;
+            // 主机想往 U盘【写入】数据阶段！
+            // 重要：即使我们是虚拟空白盘，也必须把主机发来的数据“抽干”，否则会堵死端点触发 BufferOverflow！
+            let mut bytes_read = 0;
+            let mut dump_buf = [0u8; 64]; // 数据黑洞（垃圾桶）
+            while bytes_read < dtl {
+                // 不断从 OUT 端点读取数据，然后直接覆盖丢弃，直到把 dtl 数量的数据全抽干
+                match ep_out.read(&mut dump_buf).await {
+                    Ok(n) => {
+                        bytes_read += n as u32;
+                    }
+                    Err(e) => {
+                        warn!("MSC OUT drain error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+            
+            // 告诉状态机，我们已经“妥善处理”（实际是扔了）这部分数据
+            response.residue = dtl.saturating_sub(bytes_read);
         }
 
         let mut csw = [0u8; 13];

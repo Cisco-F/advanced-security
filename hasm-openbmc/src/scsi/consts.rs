@@ -79,8 +79,8 @@ pub const MSC_VENDOR_NAME: &[u8] = b"RustBMC ";
 pub const MSC_PRODUCT_NAME: &[u8] = b"STM32 VirtualUSB";
 pub const MSC_PRODUCT_REVISION: &[u8] = b"1.0 ";
 pub const SECTOR_SIZE: u32 = 512;
-pub const SECTOR_COUNT: u32 = 8192;
-pub const DISK_SIZE: u32 = SECTOR_SIZE * SECTOR_COUNT;
+pub const SECTOR_COUNT: u32 = 64;
+pub const DISK_SIZE: u32 = SECTOR_SIZE * SECTOR_COUNT; // 32KB USB Disk
 
 // ============= SCSI cmd code =============
 pub const SCSI_TEST_UNIT_READY: u8 = 0x00;
