@@ -87,7 +87,7 @@ pub(crate) fn mode_sense_6(buf: &mut [u8]) -> ScsiResponse {
     let mut resp = [0u8; 4];
     resp[0] = 0x03;
     resp[1] = PeripheralType::DirectAccess as u8;
-    resp[2] = 0x00; // Write protected TODO 封装为统一类型
+    resp[2] = 0x80; // Write protected TODO 封装为统一类型 此处为只读
     resp[3] = 0x00; // TODO 块描述符
 
     let len = core::cmp::min(resp.len(), buf.len());

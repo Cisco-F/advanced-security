@@ -196,6 +196,11 @@ async fn main(spawner: Spawner) {
                     }
                 }
             }
+
+            if cmd[0] == SCSI_WRITE_10 {
+                warn!("write protected: command denied");
+                response.status = ScsiStatus::ScsiFail; // 告诉主机：动作失败！
+            }
             
             // 告诉状态机，我们已经“妥善处理”（实际是扔了）这部分数据
             response.residue = dtl.saturating_sub(bytes_read);

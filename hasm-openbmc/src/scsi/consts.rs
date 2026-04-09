@@ -90,3 +90,4 @@ pub const SCSI_MODE_SENSE_6: u8 = 0x1A;
 pub const SCSI_READ_FORMAT_CAPACITIES: u8 = 0x23;
 pub const SCSI_READ_CAPACITY_10: u8 = 0x25;
 pub const SCSI_READ_10: u8 = 0x28;
+pub const SCSI_WRITE_10: u8 = 0x2A;
