@@ -14,9 +14,10 @@ use embassy_stm32::{bind_interrupts, peripherals, usb};
 use embassy_time::Timer;
 use embassy_usb::Builder;
 use embassy_usb::driver::{EndpointIn, EndpointOut};
-use hasm_openbmc::scsi::cmd::BOOT_SECTOR;
 use panic_probe as _;
 
+use hasm_openbmc::scsi::cmd::BOOT_SECTOR;
+use hasm_openbmc::scsi::fake_fs::*;
 use hasm_openbmc::scsi::*;
 
 static EP_OUT_BUFFER: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
@@ -153,14 +154,21 @@ async fn main(spawner: Spawner) {
                 let chunk_data = if cmd[0] == SCSI_READ_10 {
                     let abs_offset = (lba * SECTOR_SIZE) + (offset as u32);
                     let cur_sector = abs_offset / SECTOR_SIZE;
-                    let sector_offset = abs_offset % SECTOR_SIZE;   
+                    let sector_offset = (abs_offset % SECTOR_SIZE) as usize;  
 
-                    if cur_sector == 0 {
-                        &BOOT_SECTOR[sector_offset as usize..(sector_offset as usize) + chunk_size]
-                    } else {
-                        static ZERO_BUF: [u8; 512] = [0; 512];
-                        &ZERO_BUF[(sector_offset as usize)..(sector_offset as usize) + chunk_size]
-                    }
+                    match cur_sector {
+                        0 => &BOOT_SECTOR[sector_offset..sector_offset + chunk_size],
+                        1 | 2 | 3 | 4 => &FAT_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        // LBA 5 存放文件目录名
+                        5 => &ROOT_DIR_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        // LBA 12 恰好是 FAT12 中的第一个实际用户数据簇（2号簇）
+                        12 => &HELLO_DATA_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        // 其他所有没用到的空间，全都返回 0
+                        _ => {
+                            static ZERO_BUF: [u8; 512] = [0; 512];
+                            &ZERO_BUF[sector_offset .. sector_offset + chunk_size]
+                        }
+                    } 
                 } else {
                     &data_buf[offset .. offset + chunk_size]
                 };

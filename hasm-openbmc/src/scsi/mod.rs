@@ -1,5 +1,6 @@
 pub mod cmd;
 pub mod consts;
+pub mod fake_fs;
 
 pub use crate::scsi::consts::*;
 use crate::scsi::cmd::*;

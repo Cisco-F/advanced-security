@@ -1,47 +1,12 @@
 use defmt::*;
 use crate::scsi::consts::*;
 use crate::scsi::ScsiResponse;
+use crate::scsi::fake_fs::build_boot_sector;
 
 #[repr(align(4))]
 pub struct AlignedBuffer(pub [u8; DISK_SIZE as usize]);
 
 pub static mut RAM_DISK: AlignedBuffer = AlignedBuffer([0u8; DISK_SIZE as usize]);
-
-pub const fn build_boot_sector() -> [u8; 512] {
-    let mut buf = [0x00; 512];
-    buf[0] = 0xEB; buf[1] = 0x3C; buf[2] = 0x90; 
-    // "MSDOS5.0"
-    buf[3] = 0x4D; buf[4] = 0x53; buf[5] = 0x44; buf[6] = 0x4F; buf[7] = 0x53; buf[8] = 0x35; buf[9] = 0x2E; buf[10] = 0x30;
-    
-    // 每扇区512字节
-    buf[11] = 0x00; buf[12] = 0x02;
-    // 每簇2个扇区
-    buf[13] = 0x02;
-    // 1个保留扇区
-    buf[14] = 0x01; buf[15] = 0x00;
-    // 2个FAT表
-    buf[16] = 0x02;
-    // 根目录项 112个
-    buf[17] = 0x70; buf[18] = 0x00;
-    // ★★总扇区数: 720 个 (0x02D0) = 360KB★★
-    buf[19] = 0xD0; buf[20] = 0x02;
-    // 介质描述符
-    buf[21] = 0xFD;
-    // 每个FAT占2个扇区
-    buf[22] = 0x02; buf[23] = 0x00;
-    // 签名
-    buf[38] = 0x29;
-    // 卷标: "RUST DISK  "
-    buf[43] = b'R'; buf[44] = b'U'; buf[45] = b'S'; buf[46] = b'T'; buf[47] = b' '; 
-    buf[48] = b'D'; buf[49] = b'I'; buf[50] = b'S'; buf[51] = b'K'; buf[52] = b' '; buf[53] = b' ';
-    // 文件系统: "FAT12   "
-    buf[54] = b'F'; buf[55] = b'A'; buf[56] = b'T'; buf[57] = b'1'; buf[58] = b'2'; buf[59] = b' '; buf[60] = b' '; buf[61] = b' ';
-    
-    // ★★魔法结束标志★★
-    buf[510] = 0x55; buf[511] = 0xAA;
-    
-    buf
-}
 pub static BOOT_SECTOR: [u8; 512] = build_boot_sector();
 
 pub(crate) fn request_sense(buf: &mut [u8]) -> ScsiResponse {
