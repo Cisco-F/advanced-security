@@ -157,13 +157,20 @@ async fn main(spawner: Spawner) {
                     let sector_offset = (abs_offset % SECTOR_SIZE) as usize;  
 
                     match cur_sector {
+                        // LBA 0: 引导扇区 (存放容量、架构信息)
                         0 => &BOOT_SECTOR[sector_offset..sector_offset + chunk_size],
-                        1 | 2 | 3 | 4 => &FAT_SECTOR[sector_offset .. sector_offset + chunk_size],
-                        // LBA 5 存放文件目录名
-                        5 => &ROOT_DIR_SECTOR[sector_offset .. sector_offset + chunk_size],
-                        // LBA 12 恰好是 FAT12 中的第一个实际用户数据簇（2号簇）
-                        12 => &HELLO_DATA_SECTOR[sector_offset .. sector_offset + chunk_size],
-                        // 其他所有没用到的空间，全都返回 0
+                        
+                        // LBA 1 和 257: 分别是 FAT1 和 FAT2 表的开头。
+                        // 我们的 FAT_SECTOR 里写明了 "2号簇是不再延续的最后一个簇(0xFFFF)"
+                        1 | 257 => &FAT_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        
+                        // LBA 513: FAT16 把根目录推到了这里！(存放 HELLO.TXT 的文件名和属性)
+                        513 => &ROOT_DIR_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        
+                        // LBA 545: 第 2 号簇在这个新磁盘中的绝对存放位置！(存放真实文本)
+                        545 => &HELLO_DATA_SECTOR[sector_offset .. sector_offset + chunk_size],
+                        
+                        // 其他所有没用到的空间，全给 0，让操作系统觉得这是个干净的空盘
                         _ => {
                             static ZERO_BUF: [u8; 512] = [0; 512];
                             &ZERO_BUF[sector_offset .. sector_offset + chunk_size]
