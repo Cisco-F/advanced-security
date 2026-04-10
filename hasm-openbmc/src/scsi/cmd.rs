@@ -91,9 +91,9 @@ pub(crate) fn read_capacity_10(buf: &mut [u8]) -> ScsiResponse {
     debug!("SCSI READ CAPACITY(10)");
     let mut resp = [0u8; 8];
     let last_lba = SECTOR_COUNT - 1;
-    // resp[0..4].copy_from_slice(&last_lba.to_be_bytes());
-    // resp[4..8].copy_from_slice(&SECTOR_SIZE.to_be_bytes());
-    resp = [0x00, 0x00, 0x02, 0xCF, 0x00, 0x00, 0x02, 0x00];
+    resp[0..4].copy_from_slice(&last_lba.to_be_bytes());
+    resp[4..8].copy_from_slice(&SECTOR_SIZE.to_be_bytes());
+    // resp = [0x00, 0x00, 0x02, 0xCF, 0x00, 0x00, 0x02, 0x00];
 
     let len = core::cmp::min(resp.len(), buf.len());
     buf[..len].copy_from_slice(&resp[..len]);
