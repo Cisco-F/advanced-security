@@ -1,0 +1,4 @@
+pub const IP: [u8; 4] = [192, 168, 1, 177];
+pub const PREFIX: u8 = 24;
+pub const GATEWAY: [u8; 4] = [192, 168, 1, 1];
+pub const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
