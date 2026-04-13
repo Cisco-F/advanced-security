@@ -8,6 +8,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_stm32::{
     bind_interrupts,
@@ -152,7 +153,10 @@ async fn main(spawner: Spawner) {
             continue;
         }
 
-        match bridge_uart_to_socket(&mut uart, &mut socket).await {
+        // attempt basic telnet negotiation to request character mode
+        let _ = socket.write_all(&[255u8, 253u8, 3u8, 255u8, 251u8, 1u8]).await;
+
+        match bridge_session(&mut uart, &mut socket).await {
             Ok(()) => info!("console client closed"),
             Err(()) => warn!("console session ended"),
         }
@@ -162,28 +166,80 @@ async fn main(spawner: Spawner) {
     }
 }
 
-async fn bridge_uart_to_socket<'d>(
-    uart: &mut BufferedUart<'d>,
-    socket: &mut TcpSocket<'_>,
-) -> Result<(), ()> {
-    let mut uart_buf = [0u8; 128];
+async fn bridge_session<'d>(uart: &mut BufferedUart<'d>, socket: &mut TcpSocket<'_>) -> Result<(), ()> {
+    // Split halves
+    let (mut reader, mut writer) = socket.split();
+    let (mut tx, mut rx) = uart.split_ref();
 
-    loop {
-        let count = match uart.read(&mut uart_buf).await {
-            Ok(count) => count,
-            Err(e) => {
-                warn!("uart read error: {:?}", e);
+    let uart_to_tcp = async {
+        let mut buf = [0u8; 128];
+        loop {
+            let n = match rx.read(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => return Err(()),
+            };
+            if n == 0 {
+                continue;
+            }
+            if writer.write_all(&buf[..n]).await.is_err() {
                 return Err(());
             }
-        };
-
-        if count == 0 {
-            continue;
         }
+    };
 
-        if let Err(e) = socket.write_all(&uart_buf[..count]).await {
-            warn!("tcp write error: {:?}", e);
-            return Err(());
+    let tcp_to_uart = async {
+        let mut inbuf = [0u8; 256];
+        let mut out = [0u8; 512];
+        loop {
+            let n = match reader.read(&mut inbuf).await {
+                Ok(n) => n,
+                Err(_) => return Err(()),
+            };
+            if n == 0 {
+                // client closed
+                return Err(());
+            }
+
+            // map/delete processing: DEL(0x7f)->BS(0x08), normalize CR/CRLF->LF
+            let mut wi = 0usize;
+            let mut i = 0usize;
+            while i < n {
+                let b = inbuf[i];
+                if b == 0x7f {
+                    out[wi] = 0x08;
+                    wi += 1;
+                    i += 1;
+                    continue;
+                }
+                if b == b'\r' {
+                    // if CRLF, consume both and send single LF
+                    if i + 1 < n && inbuf[i + 1] == b'\n' {
+                        out[wi] = b'\n';
+                        wi += 1;
+                        i += 2;
+                        continue;
+                    } else {
+                        out[wi] = b'\n';
+                        wi += 1;
+                        i += 1;
+                        continue;
+                    }
+                }
+                out[wi] = b;
+                wi += 1;
+                i += 1;
+            }
+
+            if wi > 0 {
+                if tx.write_all(&out[..wi]).await.is_err() {
+                    return Err(());
+                }
+            }
         }
+    };
+
+    match select(uart_to_tcp, tcp_to_uart).await {
+        Either::First(r) => r,
+        Either::Second(r) => r,
     }
 }
