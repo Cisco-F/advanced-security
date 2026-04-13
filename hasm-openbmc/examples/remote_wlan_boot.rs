@@ -18,10 +18,8 @@ use embassy_usb::driver::{EndpointIn, EndpointOut};
 use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4, Stack};
 use embassy_stm32::{
     eth::{self, Ethernet, GenericPhy, PacketQueue},
-    rcc::*,
 };
 use static_cell::StaticCell;
-use heapless::Vec;
 use panic_probe as _;
 
 use hasm_openbmc::scsi::*;
@@ -33,7 +31,8 @@ static BOS_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::n
 static CTRL_BUF: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
 static MSC_HANDLER: static_cell::StaticCell<MscHandler> = static_cell::StaticCell::new();
 // 16 扇区 × 512 = 8192 字节；DataBlock 是 DMA 安全的 4 字节对齐块，放在 BSS 段避免栈溢出
-static CACHE_BUF: static_cell::StaticCell<[DataBlock; 16]> = static_cell::StaticCell::new();
+// 24 扇区 × 512 = 12288 字节 (12 KiB)。DataBlock 是 DMA 安全的 4 字节对齐块，放在 BSS 段避免栈溢出
+static CACHE_BUF: static_cell::StaticCell<[DataBlock; 24]> = static_cell::StaticCell::new();
 
 /// USB MSC class-specific control request handler.
 struct MscHandler {
@@ -111,87 +110,102 @@ impl RemoteImage {
     /// It is intentionally simple to keep RAM usage low on the STM32.
     pub async fn read_blocks(&mut self, start_lba: u32, buf: &mut [DataBlock]) -> Result<(), ()> {
         use embedded_io_async::Write;
-        use embedded_io_async::Read;
 
-        // Per-block request to minimize RAM usage on STM32.
-        for (i, block) in buf.iter_mut().enumerate() {
-            let lba = start_lba.saturating_add(i as u32);
+        // Batch request: ask for contiguous range covering all requested blocks
+        let blocks = buf.len();
+        if blocks == 0 {
+            return Ok(());
+        }
+        let start_byte: u32 = start_lba.checked_mul(512u32).unwrap_or(0u32);
+        let total_bytes_usize = blocks * 512usize;
+        let total_bytes_u32 = total_bytes_usize as u32;
 
-            // socket buffers on stack
-            let mut socket_rx_buffer = [0u8; 1024];
-            let mut socket_tx_buffer = [0u8; 512];
-            let mut socket = TcpSocket::new(self.stack, &mut socket_rx_buffer, &mut socket_tx_buffer);
+        // socket buffers on stack
+        let mut socket_rx_buffer = [0u8; 1024];
+        let mut socket_tx_buffer = [0u8; 512];
+        let mut socket = TcpSocket::new(self.stack, &mut socket_rx_buffer, &mut socket_tx_buffer);
 
-            let remote_endpoint = (self.server, self.port);
-            info!("RemoteImage: GET /block/{} -> connecting", lba);
-            if let Err(e) = socket.connect(remote_endpoint).await {
-                warn!("connect error: {:?}", e);
-                return Err(());
-            }
-            info!("RemoteImage: connected to server");
+        let remote_endpoint = (self.server, self.port);
+        debug!("RemoteImage: GET /image Range={}..{} -> connecting", start_byte, start_byte + total_bytes_u32 - 1);
+        if let Err(e) = socket.connect(remote_endpoint).await {
+            warn!("connect error: {:?}", e);
+            return Err(());
+        }
+        debug!("RemoteImage: connected to server");
 
-            // Build request: GET /block/{lba} HTTP/1.1\r\nHost: <ip>\r\nConnection: close\r\n\r\n
-            let mut numbuf = [0u8; 16];
-            let lba_ascii = Self::u32_to_ascii(lba, &mut numbuf);
+        // Build request: GET /image HTTP/1.1 with Range header
+        let mut numbuf = [0u8; 24];
+        let start_ascii = Self::u32_to_ascii(start_byte, &mut numbuf);
 
-            let _ = socket.write_all(b"GET /block/").await;
-            let _ = socket.write_all(lba_ascii).await;
-            let _ = socket.write_all(b" HTTP/1.1\r\nHost: ").await;
+        let _ = socket.write_all(b"GET /image HTTP/1.1\r\nHost: ").await;
+        let mut ip_buf = [0u8; 16];
+        let s = format_ip(self.server, &mut ip_buf);
+        let _ = socket.write_all(s).await;
+        let _ = socket.write_all(b"\r\nRange: bytes=").await;
+        let _ = socket.write_all(start_ascii).await;
+        let _ = socket.write_all(b"-").await;
+        let end_ascii = Self::u32_to_ascii(start_byte + total_bytes_u32 - 1, &mut numbuf);
+        let _ = socket.write_all(end_ascii).await;
+        let _ = socket.write_all(b"\r\nConnection: close\r\n\r\n").await;
 
-            // write server ip as dotted quad
-            let mut ip_buf = [0u8; 16];
-            let s = format_ip(self.server, &mut ip_buf);
-            let _ = socket.write_all(s).await;
-
-            let _ = socket.write_all(b"\r\nConnection: close\r\n\r\n").await;
-
-            // read header
-            let mut header_buf = [0u8; 512];
-            let mut filled = 0usize;
-            'read_hdr: loop {
-                match socket.read(&mut header_buf[filled..]).await {
-                    Ok(0) => { warn!("socket closed while reading header"); return Err(()); }
-                    Err(_) => { warn!("socket read error while reading header"); return Err(()); }
-                    Ok(n) => {
-                        filled += n;
-                        if header_buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
-                            break 'read_hdr;
-                        }
-                        if filled >= header_buf.len() { warn!("header too large"); return Err(()); }
+        // read header
+        let mut header_buf = [0u8; 512];
+        let mut filled = 0usize;
+        'read_hdr: loop {
+            match socket.read(&mut header_buf[filled..]).await {
+                Ok(0) => { warn!("socket closed while reading header"); return Err(()); }
+                Err(_) => { warn!("socket read error while reading header"); return Err(()); }
+                Ok(n) => {
+                    filled += n;
+                    if header_buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break 'read_hdr;
                     }
+                    if filled >= header_buf.len() { warn!("header too large"); return Err(()); }
                 }
             }
+        }
 
-            // find start of body
-            let mut body_start = 0usize;
-            for i in 0..filled - 3 {
-                if &header_buf[i..i + 4] == b"\r\n\r\n" {
-                    body_start = i + 4;
-                    break;
-                }
+        // find start of body
+        let mut body_start = 0usize;
+        for i in 0..filled - 3 {
+            if &header_buf[i..i + 4] == b"\r\n\r\n" {
+                body_start = i + 4;
+                break;
             }
+        }
 
-            // copy any body bytes already read
-            let mut got = 0usize;
-            if filled > body_start {
-                let avail = filled - body_start;
-                let take = core::cmp::min(512, avail);
-                block.0[..take].copy_from_slice(&header_buf[body_start..body_start + take]);
+        // copy any body bytes already read into blocks sequentially
+        let mut got = 0usize;
+        if filled > body_start {
+            let mut avail = filled - body_start;
+            let mut src_off = body_start;
+            while avail > 0 && got < total_bytes_usize {
+                let block_idx = got / 512;
+                let byte_in_block = got % 512;
+                let take = core::cmp::min(512 - byte_in_block, avail);
+                let dst = &mut buf[block_idx].0[byte_in_block..byte_in_block + take];
+                dst.copy_from_slice(&header_buf[src_off..src_off + take]);
+                src_off += take;
+                avail -= take;
                 got += take;
             }
-
-            // continue reading until we have 512 bytes
-            while got < 512 {
-                match socket.read(&mut block.0[got..]).await {
-                    Ok(0) => { warn!("socket closed while reading body"); return Err(()); }
-                    Err(_) => { warn!("socket read error while reading body"); return Err(()); }
-                    Ok(n) => got += n,
-                }
-            }
-            let _ = socket.flush().await;
-            socket.close();
-            info!("RemoteImage: fetched LBA {} ({} bytes)", lba, got);
         }
+
+        // continue reading until we filled all requested bytes
+        while got < total_bytes_usize {
+            let block_idx = got / 512;
+            let byte_in_block = got % 512;
+            let dst = &mut buf[block_idx].0[byte_in_block..];
+            match socket.read(dst).await {
+                Ok(0) => { warn!("socket closed while reading body"); return Err(()); }
+                Err(_) => { warn!("socket read error while reading body"); return Err(()); }
+                Ok(n) => got += n,
+            }
+        }
+
+        let _ = socket.flush().await;
+        socket.close();
+        info!("RemoteImage: fetched LBA {}..{} ({} bytes)", start_lba, start_lba + blocks as u32 - 1, total_bytes_usize);
 
         Ok(())
     }
@@ -352,7 +366,8 @@ async fn main(spawner: Spawner) {
     let mut meta_buf = [0u8; 64];
 
     // 缓存区：16 × 512 = 8192 字节
-    const CACHE_SECS: usize = 16;
+    // 缓存区：24 × 512 = 12288 字节 (单次最大传输 12 KiB)
+    const CACHE_SECS: usize = 24;
     let cache_blocks: &mut [DataBlock; CACHE_SECS] =
         CACHE_BUF.init(core::array::from_fn(|_| DataBlock([0u8; 512])));
 

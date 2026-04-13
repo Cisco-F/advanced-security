@@ -63,6 +63,9 @@ async def handle_image(request):
     size = app['img_size']
     data = app.get('img_mem')
 
+    # log request
+    print(f"[server] {request.remote} GET /image Range={request.headers.get('Range')}")
+
     range_hdr = request.headers.get('Range')
     r = http_range_to_slice(range_hdr, size)
     if r is None:
@@ -111,6 +114,9 @@ async def handle_block(request):
     img_path = app['img_path']
     size = app['img_size']
     data = app.get('img_mem')
+
+    # log request
+    print(f"[server] {request.remote} GET /block/{request.match_info.get('lba')} count={request.query.get('count')}")
 
     lba_s = request.match_info.get('lba')
     try:
