@@ -1,8 +1,23 @@
-// ==========================================
-// 256MB FAT16 虚拟磁盘结构
-// 总容量: 256 * 1024 * 1024 / 512 = 524,288 个扇区
-// 簇大小: 8KB (16个扇区)
-// ==========================================
+use crate::storage::BlockDevice;
+
+
+pub static BOOT_SECTOR: [u8; 512] = build_boot_sector();
+
+pub struct ExampleBlockDevice;
+
+impl BlockDevice for ExampleBlockDevice {
+    async fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+        match lba {
+            0 => buf.copy_from_slice(&BOOT_SECTOR[..Self::BLOCK_SIZE as usize]),
+            1 | 257 => buf.copy_from_slice(&FAT_SECTOR[..Self::BLOCK_SIZE as usize]),
+            513 => buf.copy_from_slice(&ROOT_DIR_SECTOR[..Self::BLOCK_SIZE as usize]),
+            545 => buf.copy_from_slice(&HELLO_DATA_SECTOR[..Self::BLOCK_SIZE as usize]),
+            _ => buf.fill(0), // 其他未使用的块全填充为0，模拟一个干净的空盘
+        }
+
+        Ok(())
+    }
+}
 
 pub const fn build_boot_sector() -> [u8; 512] {
     let mut buf = [0x00; 512];

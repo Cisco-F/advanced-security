@@ -26,8 +26,6 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH
 async fn main(spawner: Spawner) {
     let p = sys_init();
 
-    info!("BMC Init...");
-
     let eth_device = ethernet_device(
         p.ETH,
         p.PA1,

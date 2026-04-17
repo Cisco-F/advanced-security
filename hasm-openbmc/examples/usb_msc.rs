@@ -36,26 +36,7 @@ async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, perip
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // 时钟配置
-    let mut config = embassy_stm32::Config::default();
-    config.rcc.hse = Some(Hse {
-        freq: Hertz(25_000_000),
-        mode: HseMode::Oscillator,
-    });
-    config.rcc.pll_src = PllSource::HSE;
-    config.rcc.pll = Some(Pll {
-        prediv: PllPreDiv::DIV25,
-        mul: PllMul::MUL336,
-        divp: Some(PllPDiv::DIV2),
-        divq: Some(PllQDiv::DIV7),
-        divr: None,
-    });
-    config.rcc.sys = Sysclk::PLL1_P;
-    config.rcc.ahb_pre = AHBPrescaler::DIV1;
-    config.rcc.apb1_pre = APBPrescaler::DIV4;
-    config.rcc.apb2_pre = APBPrescaler::DIV2;
-
-    let p = embassy_stm32::init(config);
+    let p = hasm_openbmc::hal::init::sys_init();
     info!("✓ Clock init");
 
     // USB 配置
@@ -138,17 +119,6 @@ async fn main(spawner: Spawner) {
 
             while offset < send_len {
                 let chunk_size = core::cmp::min(send_len - offset, 64);
-
-                // let chunk_data = &data_buf[offset..offset + chunk_size];
-
-                // if let Err(e) = ep_in.write(chunk_data).await {
-                //     error!("MSC IN write chunk error: {:?}", e);
-                //     response.residue = dtl.saturating_sub(offset as u32);
-                //     write_ok = false;
-                //     break;
-                // }
-
-                // offset += chunk_size;
 
                 let lba = u32::from_be_bytes([cmd[2], cmd[3], cmd[4], cmd[5]]);
                 let chunk_data = if cmd[0] == SCSI_READ_10 {
