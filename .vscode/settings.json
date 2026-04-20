@@ -1,10 +1,8 @@
 {
     // 强制 rust-analyzer 使用你的芯片架构进行检查，而不是宿主机(Windows/Linux)架构
     "rust-analyzer.cargo.target": "thumbv7em-none-eabi",
-
     // 告诉 rust-analyzer 不要检查所有目标（比如测试代码），只检查主程序
     "rust-analyzer.check.allTargets": false,
-
     // 额外的检查参数，确保它只检查核心部分
     "rust-analyzer.check.extraArgs": [
         "--bins"

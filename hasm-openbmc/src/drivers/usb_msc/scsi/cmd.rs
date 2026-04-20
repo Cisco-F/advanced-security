@@ -1,10 +1,9 @@
-use defmt::*;
 use crate::drivers::usb_msc::device::ScsiDataSink;
-use crate::drivers::usb_msc::scsi::consts::*;
 use crate::drivers::usb_msc::scsi::ScsiResponse;
+use crate::drivers::usb_msc::scsi::consts::*;
 use crate::drivers::usb_msc::transport::Cbw;
 use crate::storage::BlockDevice;
-
+use defmt::*;
 
 pub(crate) async fn request_sense(sink: &mut impl ScsiDataSink) -> ScsiResponse {
     debug!("SCSI REQUEST SENSE");
@@ -18,7 +17,7 @@ pub(crate) async fn request_sense(sink: &mut impl ScsiDataSink) -> ScsiResponse 
         Err(e) => {
             warn!("Failed to send REQUEST SENSE response: {:?}", e.usb_error);
             ScsiResponse::fail(e.residue)
-        },
+        }
     }
 }
 
@@ -40,7 +39,7 @@ pub(crate) async fn inquiry(sink: &mut impl ScsiDataSink) -> ScsiResponse {
         Err(e) => {
             warn!("Failed to send REQUEST SENSE response: {:?}", e.usb_error);
             ScsiResponse::fail(e.residue)
-        },
+        }
     }
 }
 
@@ -57,7 +56,7 @@ pub(crate) async fn mode_sense_6(sink: &mut impl ScsiDataSink) -> ScsiResponse {
         Err(e) => {
             warn!("Failed to send MODE SENSE(6) response: {:?}", e.usb_error);
             ScsiResponse::fail(e.residue)
-        },
+        }
     }
 }
 
@@ -77,9 +76,12 @@ pub(crate) async fn read_format_capacities(sink: &mut impl ScsiDataSink) -> Scsi
     match sink.write(&resp).await {
         Ok(_) => ScsiResponse::success(),
         Err(e) => {
-            warn!("Failed to send READ FORMAT CAPACITIES response: {:?}", e.usb_error);
+            warn!(
+                "Failed to send READ FORMAT CAPACITIES response: {:?}",
+                e.usb_error
+            );
             ScsiResponse::fail(e.residue)
-        },
+        }
     }
 }
 
@@ -95,9 +97,12 @@ pub(crate) async fn read_capacity_10(sink: &mut impl ScsiDataSink) -> ScsiRespon
     match sink.write(&resp).await {
         Ok(_) => ScsiResponse::success(),
         Err(e) => {
-            warn!("Failed to send READ CAPACITY(10) response: {:?}", e.usb_error);
+            warn!(
+                "Failed to send READ CAPACITY(10) response: {:?}",
+                e.usb_error
+            );
             ScsiResponse::fail(e.residue)
-        },
+        }
     }
 }
 
@@ -120,7 +125,7 @@ pub(crate) async fn read_10<B: BlockDevice>(
         return ScsiResponse::fail(total_bytes);
     }
 
-    debug!("→ READ_10 LBA={}, Blocks={}", lba, num_blocks);
+    info!("→ READ_10 LBA={}, Blocks={}", lba, num_blocks);
 
     let mut buf = [0u8; SECTOR_SIZE as usize];
     let mut offset = 0usize;
@@ -128,7 +133,7 @@ pub(crate) async fn read_10<B: BlockDevice>(
         if offset >= total_bytes as usize {
             break;
         }
-        
+
         if let Err(_) = block_device.read_block(lba + blk, &mut buf).await {
             error!("Block device read error at LBA={}", lba + blk);
             return ScsiResponse::fail(total_bytes);

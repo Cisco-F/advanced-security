@@ -1,49 +1,106 @@
-use core::error::Error;
-
-use defmt::*;
-use embassy_executor::Spawner;
+use defmt::{error, info};
 use embassy_stm32::{
-    Config, Peripherals, bind_interrupts, peripherals::{self, SDIO}, sdmmc::{self, DataBlock, Sdmmc}, time::Hertz
+    Peri, bind_interrupts,
+    peripherals::{self, DMA2_CH3, PC8, PC9, PC10, PC11, PC12, PD2, SDIO},
+    sdmmc::{self, DataBlock, Sdmmc},
+    time::Hertz,
 };
-use embassy_stm32::rcc::*;
-use {defmt_rtt as _, panic_probe as _};
+
+use crate::drivers::usb_msc::scsi::SECTOR_SIZE;
 
 bind_interrupts!(struct TfIrqs {
     SDIO => sdmmc::InterruptHandler<peripherals::SDIO>;
 });
 
-pub async fn tf_init(p: Peripherals) -> Result<Sdmmc<'static, SDIO>, sdmmc::Error> {
-  let mut sdmmc = Sdmmc::new_4bit(
-    p.SDIO,
-    TfIrqs,
-    p.DMA2_CH3,
-    p.PC12, // CK
-    p.PD2,  // CMD
-    p.PC8,  // D0
-    p.PC9,  // D1
-    p.PC10, // D2
-    p.PC11, // D3
-    Default::default(),
-  );
-
-  match &sdmmc.init_sd_card(Hertz(400_000)).await {
-    Ok(_) => info!("TF Card init OK"),
-    Err(e) => {
-      error!("TF Card init failed: {:?}", e);
-      return Err(*e);
-    }
-  }
-
-  if let Ok(card) = sdmmc.card() {
-    match card {
-      sdmmc::SdmmcPeripheral::SdCard(c) => info!("SD Card detected, CSD version: {}", c.csd.version()),
-      sdmmc::SdmmcPeripheral::Emmc(_) => info!("eMMC detected"),
-    }
-  }
-
-  Ok(sdmmc)
+pub struct TfCard<'d> {
+    sdmmc: Option<Sdmmc<'d, peripherals::SDIO>>,
 }
 
-pub async fn read_tf_by_sector(sector: u32) -> Result<(), sdmmc::Error> {
-  Ok(())
+impl<'d> TfCard<'d> {
+    pub fn new() -> Self {
+        Self { sdmmc: None }
+    }
+
+    pub async fn init(
+        &mut self,
+        sdmmc: Peri<'static, SDIO>,
+        dma: Peri<'static, DMA2_CH3>,
+        clk: Peri<'static, PC12>,
+        cmd: Peri<'static, PD2>,
+        d0: Peri<'static, PC8>,
+        d1: Peri<'static, PC9>,
+        d2: Peri<'static, PC10>,
+        d3: Peri<'static, PC11>,
+    ) -> Result<(), ()> {
+        let mut sdmmc = Sdmmc::new_4bit(
+            sdmmc,
+            TfIrqs,
+            dma,
+            clk,
+            cmd,
+            d0,
+            d1,
+            d2,
+            d3,
+            Default::default(),
+        );
+
+        match &sdmmc.init_sd_card(Hertz(400_000)).await {
+            Ok(_) => info!("TF Card init OK"),
+            Err(e) => {
+                error!("TF Card init failed: {:?}", e);
+                return Err(());
+            }
+        }
+
+        if let Ok(card) = sdmmc.card() {
+            match card {
+                sdmmc::SdmmcPeripheral::SdCard(c) => {
+                    info!("SD Card detected, CSD version: {}", c.csd.version())
+                }
+                sdmmc::SdmmcPeripheral::Emmc(_) => info!("eMMC detected"),
+            }
+        }
+
+        self.sdmmc = Some(sdmmc);
+        Ok(())
+    }
+
+    pub async fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+        let mut data_block = DataBlock([0u8; SECTOR_SIZE as usize]);
+        match self
+            .sdmmc
+            .as_mut()
+            .unwrap()
+            .read_block(lba, &mut data_block)
+            .await
+        {
+            Ok(_) => {
+                buf.copy_from_slice(&data_block.0);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Failed to read block {}: {:?}", lba, e);
+                return Err(());
+            }
+        }
+    }
+
+    pub async fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()> {
+        let mut data_block = DataBlock([0u8; SECTOR_SIZE as usize]);
+        data_block.0.copy_from_slice(buf);
+        match self
+            .sdmmc
+            .as_mut()
+            .unwrap()
+            .write_block(lba, &data_block)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Failed to write block {}: {:?}", lba, e);
+                Err(())
+            }
+        }
+    }
 }

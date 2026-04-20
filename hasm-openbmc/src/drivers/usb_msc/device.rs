@@ -2,10 +2,9 @@ use defmt::warn;
 use embassy_stm32::peripherals::{PA11, PA12, USB_OTG_FS};
 use embassy_stm32::usb::{Config, Driver};
 use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
-use embassy_usb::{Builder, UsbDevice};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
+use embassy_usb::{Builder, UsbDevice};
 use panic_probe as _;
-
 
 static EP_OUT_BUFFER: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
 static CONFIG_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
@@ -17,7 +16,7 @@ bind_interrupts!(struct UsbIrqs {
 });
 
 pub struct SendToHostError {
-    pub residue: u32, // Number of bytes not sent
+    pub residue: u32,             // Number of bytes not sent
     pub usb_error: EndpointError, // The underlying USB error
 }
 
@@ -45,14 +44,7 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         let ep_out_buffer = EP_OUT_BUFFER.init([0; 256]);
         let mut usb_cfg = Config::default();
         usb_cfg.vbus_detection = false;
-        let driver = Driver::new_fs(
-            usb_otg_fs,
-            UsbIrqs,
-            dp,
-            dm,
-            ep_out_buffer,
-            usb_cfg,
-        );
+        let driver = Driver::new_fs(usb_otg_fs, UsbIrqs, dp, dm, ep_out_buffer, usb_cfg);
 
         let config_desc = CONFIG_DESC.init([0; 256]);
         let bos_desc = BOS_DESC.init([0; 256]);
@@ -65,14 +57,7 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         cfg.max_power = 100;
         cfg.max_packet_size_0 = 64;
 
-        let mut builder = Builder::new(
-            driver, 
-            cfg, 
-            config_desc, 
-            bos_desc, 
-            &mut [], 
-            ctrl_buf
-        );
+        let mut builder = Builder::new(driver, cfg, config_desc, bos_desc, &mut [], ctrl_buf);
 
         // MSC interface descriptors: Class=0x08, Subclass=0x06, Protocol=0x50
         let mut function = builder.function(0x08, 0x06, 0x50);
@@ -92,12 +77,12 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
 
 #[allow(async_fn_in_trait)]
 pub trait ScsiDataSink {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<u32, EndpointError>;
+    async fn read(&mut self, buf: &mut [u8]) -> Result<(), EndpointError>;
     async fn write(&mut self, buf: &[u8]) -> Result<(), SendToHostError>;
 }
 
 impl ScsiDataSink for MSCDev<Driver<'static, USB_OTG_FS>> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<u32, EndpointError> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<(), EndpointError> {
         let ep_out = match self.ep_out.as_mut() {
             Some(e) => e,
             None => return Err(EndpointError::Disabled),
@@ -111,16 +96,23 @@ impl ScsiDataSink for MSCDev<Driver<'static, USB_OTG_FS>> {
             }
         };
 
-        Ok(n as u32)
+        if n < 31 {
+            warn!("Received short CBW: {} bytes", n);
+            return Err(EndpointError::Disabled);
+        }
+
+        Ok(())
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<(), SendToHostError> {
         let ep_in = match self.ep_in.as_mut() {
             Some(e) => e,
-            None => return Err(SendToHostError {
-                residue: buf.len() as u32,
-                usb_error: EndpointError::Disabled,
-            }),
+            None => {
+                return Err(SendToHostError {
+                    residue: buf.len() as u32,
+                    usb_error: EndpointError::Disabled,
+                });
+            }
         };
 
         let mut offset = 0usize;
