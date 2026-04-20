@@ -1,15 +1,17 @@
-use defmt::warn;
+use defmt::{info, warn};
 use embassy_stm32::peripherals::{PA11, PA12, USB_OTG_FS};
 use embassy_stm32::usb::{Config, Driver};
 use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
-use embassy_usb::{Builder, UsbDevice};
+use embassy_usb::{Builder, Handler, UsbDevice};
+use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use panic_probe as _;
 
 static EP_OUT_BUFFER: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
 static CONFIG_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
 static BOS_DESC: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
 static CTRL_BUF: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
+static MSC_HANDLER: static_cell::StaticCell<MscHandler> = static_cell::StaticCell::new();
 
 bind_interrupts!(struct UsbIrqs {
     OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
@@ -18,6 +20,39 @@ bind_interrupts!(struct UsbIrqs {
 pub struct SendToHostError {
     pub residue: u32,             // Number of bytes not sent
     pub usb_error: EndpointError, // The underlying USB error
+}
+
+struct MscHandler {
+    iface_num: u8,
+}
+
+impl Handler for MscHandler {
+    fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        if req.request_type == RequestType::Class
+            && req.recipient == Recipient::Interface
+            && req.request == 0xFE  // GET_MAX_LUN
+            && req.index == self.iface_num as u16
+        {
+            info!("GET_MAX_LUN -> 0");
+            buf[0] = 0x00; // one LUN (index 0)
+            Some(InResponse::Accepted(&buf[..1]))
+        } else {
+            None
+        }
+    }
+
+    fn control_out(&mut self, req: Request, _data: &[u8]) -> Option<OutResponse> {
+        if req.request_type == RequestType::Class
+            && req.recipient == Recipient::Interface
+            && req.request == 0xFF  // Bulk-Only Mass Storage Reset
+            && req.index == self.iface_num as u16
+        {
+            info!("BULK_ONLY_RESET");
+            Some(OutResponse::Accepted)
+        } else {
+            None
+        }
+    }
 }
 
 pub struct MSCDev<D: embassy_usb::driver::Driver<'static>> {
@@ -65,8 +100,12 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         let mut alt_setting = interface.alt_setting(0x08, 0x06, 0x50, None);
         let ep_out = alt_setting.endpoint_bulk_out(None, 64);
         let ep_in = alt_setting.endpoint_bulk_in(None, 64);
+        let iface_num = interface.interface_number().0;
         drop(function);
 
+        let msc_handler = MSC_HANDLER.init(MscHandler { iface_num });
+        builder.handler(msc_handler);
+        
         let usb_device = builder.build();
 
         self.ep_in = Some(ep_in);

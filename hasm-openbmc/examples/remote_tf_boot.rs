@@ -20,7 +20,7 @@ use embassy_time::Timer;
 use embassy_usb::driver::{EndpointIn, EndpointOut};
 use panic_probe as _;
 
-use hasm_openbmc::scsi::*;
+use hasm_openbmc::{drivers::usb_msc::scsi::*, hal::init::sys_init};
 
 
 static EP_OUT_BUFFER: static_cell::StaticCell<[u8; 256]> = static_cell::StaticCell::new();
@@ -129,7 +129,7 @@ async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, perip
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(hasm_openbmc::clk_init());
+    let p = sys_init();
 
     info!("TF Card Init...");
 

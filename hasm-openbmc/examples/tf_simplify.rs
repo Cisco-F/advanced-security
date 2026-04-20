@@ -6,6 +6,7 @@ use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::peripherals;
 use embassy_stm32::usb::Driver;
+use embassy_time::Timer;
 use hasm_openbmc::drivers::usb_msc::device::ScsiDataSink;
 use hasm_openbmc::drivers::usb_msc::scsi::{CSW_SIGNATURE, handle_scsi_cmd};
 use hasm_openbmc::drivers::usb_msc::transport::Cbw;
@@ -47,7 +48,14 @@ async fn main(spawner: Spawner) {
     let mut cbw_buf = [0u8; 31];
 
     loop {
-        msc_dev.read(&mut cbw_buf).await.unwrap_err();
+        let n = match msc_dev.read(&mut cbw_buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("MSC OUT read error: {:?}", e);
+                Timer::after_millis(10).await;
+                continue;
+            }
+        };
 
         let cbw = Cbw::from_bytes(&cbw_buf);
         let response = handle_scsi_cmd(&mut bdev, &mut msc_dev, cbw).await;
