@@ -5,6 +5,7 @@ use crate::drivers::usb_msc::scsi::SECTOR_SIZE;
 
 pub mod example_fs;
 pub mod tf;
+pub mod remote;
 
 #[allow(async_fn_in_trait)]
 pub trait BlockDevice {
