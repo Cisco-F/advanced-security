@@ -3,7 +3,7 @@ pub mod consts;
 
 
 pub use crate::drivers::usb_msc::scsi::consts::*;
-use crate::{drivers::usb_msc::{device::ScsiDataSink, scsi::cmd::*, transport::Cbw}, storage::BlockDevice};
+use crate::{drivers::usb_msc::{device::ScsiDataSink, scsi::cmd::*, transport::Cbw}, block::BlockDevice};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScsiResponse {

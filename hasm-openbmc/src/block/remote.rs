@@ -1,27 +1,8 @@
-#![no_std]
-#![no_main]
-
 use defmt::*;
-use embassy_executor::Spawner;
-use embassy_stm32::{
-    bind_interrupts,
-    peripherals,
-    sdmmc::DataBlock,
-    usb::{self, Config as UsbConfig, Driver},
-};
-use embassy_usb::Builder;
-use embassy_usb::Handler;
-use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
-use crate::{storage::BlockDevice, utils::{format_ip, u32_to_ascii}};
+use crate::{block::BlockDevice, utils::{format_ip, u32_to_ascii}};
 
 use {defmt_rtt as _, panic_probe as _};
-use embassy_time::Timer;
-use embassy_usb::driver::{EndpointIn, EndpointOut};
-use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4, Stack};
-use embassy_stm32::{
-    eth::{self, Ethernet, GenericPhy, PacketQueue},
-};
-use static_cell::StaticCell;
+use embassy_net::{tcp::TcpSocket, Ipv4Address, Stack};
 use embedded_io_async::Write;
 use panic_probe as _;
 
@@ -39,6 +20,11 @@ impl RemoteBlockDevice {
 
 impl BlockDevice for RemoteBlockDevice {
     async fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+        self.read_blocks(lba, buf).await?;
+        Ok(())
+    }
+
+    async fn read_blocks(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
         let total_bytes = buf.len();
         if total_bytes == 0 {
             return Ok(());
@@ -48,8 +34,11 @@ impl BlockDevice for RemoteBlockDevice {
         let mut socket_tx_buffer = [0u8; 512];
         let mut socket = TcpSocket::new(self.stack, &mut socket_rx_buffer, &mut socket_tx_buffer);
 
+        let start_byte = lba * 512;
+        let end_byte = start_byte + total_bytes as u32 - 1;
+
         let remote_endpoint = (self.server, self.port);
-        debug!("RemoteImage: GET /image Range={}..{} -> connecting", lba, lba + total_bytes as u32 - 1);
+        debug!("RemoteImage: GET /image Range={}..{} -> connecting", start_byte, end_byte);
         if let Err(e) = socket.connect(remote_endpoint).await {
             warn!("connect error: {:?}", e);
             return Err(());
@@ -57,16 +46,17 @@ impl BlockDevice for RemoteBlockDevice {
         debug!("RemoteImage: connected to server");
 
         let mut numbuf = [0u8; 24];
-        let start_ascii = u32_to_ascii(lba, &mut numbuf);
 
         let _ = socket.write_all(b"GET /image HTTP/1.1\r\nHost: ").await;
         let mut ip_buf = [0u8; 16];
         let s = format_ip(self.server, &mut ip_buf);
         let _ = socket.write_all(s).await;
         let _ = socket.write_all(b"\r\nRange: bytes=").await;
+        
+        let start_ascii = u32_to_ascii(start_byte, &mut numbuf);
         let _ = socket.write_all(start_ascii).await;
         let _ = socket.write_all(b"-").await;
-        let end_ascii = u32_to_ascii(lba + total_bytes as u32 - 1, &mut numbuf);
+        let end_ascii = u32_to_ascii(end_byte, &mut numbuf);
         let _ = socket.write_all(end_ascii).await;
         let _ = socket.write_all(b"\r\nConnection: close\r\n\r\n").await;
 
@@ -122,7 +112,7 @@ impl BlockDevice for RemoteBlockDevice {
 
         let _ = socket.flush().await;
         socket.close();
-        info!("RemoteImage: fetched LBA {}..{} ({} bytes)", lba, lba + total_bytes as u32 - 1, total_bytes);
+        info!("RemoteImage: fetched byte range {}..{} ({} bytes, LBA {})", start_byte, end_byte, total_bytes, lba);
 
         Ok(())
     }

@@ -2,7 +2,7 @@ use crate::drivers::usb_msc::device::ScsiDataSink;
 use crate::drivers::usb_msc::scsi::ScsiResponse;
 use crate::drivers::usb_msc::scsi::consts::*;
 use crate::drivers::usb_msc::transport::Cbw;
-use crate::storage::BlockDevice;
+use crate::block::BlockDevice;
 use defmt::*;
 
 pub(crate) async fn request_sense(sink: &mut impl ScsiDataSink) -> ScsiResponse {

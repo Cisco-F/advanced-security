@@ -7,10 +7,11 @@ use embassy_executor::Spawner;
 use embassy_stm32::peripherals;
 use embassy_stm32::usb::Driver;
 use embassy_time::Timer;
+use hasm_openbmc::block::cached_data::CachedData;
 use hasm_openbmc::drivers::usb_msc::device::ScsiDataSink;
 use hasm_openbmc::drivers::usb_msc::scsi::{CSW_SIGNATURE, handle_scsi_cmd};
 use hasm_openbmc::drivers::usb_msc::transport::Cbw;
-use hasm_openbmc::storage::tf::TfBlockDevice;
+use hasm_openbmc::block::tf::TfBlockDevice;
 use panic_probe as _;
 
 #[embassy_executor::task]
@@ -42,6 +43,7 @@ async fn main(spawner: Spawner) {
             return;
         }
     }
+    let mut cached_bdev = CachedData::new(bdev);
 
     info!("✓ USB MSC device ready!");
 
@@ -58,7 +60,7 @@ async fn main(spawner: Spawner) {
         };
 
         let cbw = Cbw::from_bytes(&cbw_buf);
-        let response = handle_scsi_cmd(&mut bdev, &mut msc_dev, cbw).await;
+        let response = handle_scsi_cmd(&mut cached_bdev, &mut msc_dev, cbw).await;
 
         let mut csw = [0u8; 13];
         csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());

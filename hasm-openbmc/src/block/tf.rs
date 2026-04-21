@@ -3,7 +3,7 @@ use embassy_stm32::{
 	Peri, peripherals::{DMA2_CH3, PC8, PC9, PC10, PC11, PC12, PD2, SDIO}
 };
 
-use crate::{drivers::tf::TfCard, storage::BlockDevice};
+use crate::{drivers::tf::TfCard, block::BlockDevice};
 
 
 pub struct TfBlockDevice<'d> {
@@ -42,6 +42,17 @@ impl<'d> BlockDevice for TfBlockDevice<'d> {
 	async fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
 		self.inner.read_block(lba, buf).await?;
 		Ok(())
+	}
+
+	async fn read_blocks(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+		let blocks_to_read = (buf.len() as u32 + Self::BLOCK_SIZE - 1) / Self::BLOCK_SIZE;
+        for i in 0..blocks_to_read {
+            let block_lba = lba + i;
+            let block_offset = (i * Self::BLOCK_SIZE) as usize;
+            let block_buf = &mut buf[block_offset..block_offset + Self::BLOCK_SIZE as usize];
+            self.read_block(block_lba, block_buf).await?;
+        }
+        Ok(())
 	}
 
 	async fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()> {

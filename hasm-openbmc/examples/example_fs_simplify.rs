@@ -17,7 +17,7 @@ use embassy_usb::driver::{EndpointIn, EndpointOut};
 use hasm_openbmc::drivers::usb_msc::device::ScsiDataSink;
 use hasm_openbmc::drivers::usb_msc::scsi::{CSW_SIGNATURE, handle_scsi_cmd};
 use hasm_openbmc::drivers::usb_msc::transport::Cbw;
-use hasm_openbmc::storage::example_fs::ExampleBlockDevice;
+use hasm_openbmc::block::example_fs::ExampleBlockDevice;
 use panic_probe as _;
 
 

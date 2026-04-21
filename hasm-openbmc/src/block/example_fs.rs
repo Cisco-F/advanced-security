@@ -1,4 +1,4 @@
-use crate::storage::BlockDevice;
+use crate::block::BlockDevice;
 
 
 pub static BOOT_SECTOR: [u8; 512] = build_boot_sector();
@@ -15,6 +15,17 @@ impl BlockDevice for ExampleBlockDevice {
             _ => buf.fill(0), // 其他未使用的块全填充为0，模拟一个干净的空盘
         }
 
+        Ok(())
+    }
+
+    async fn read_blocks(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+        let blocks_to_read = (buf.len() as u32 + Self::BLOCK_SIZE - 1) / Self::BLOCK_SIZE;
+        for i in 0..blocks_to_read {
+            let block_lba = lba + i;
+            let block_offset = (i * Self::BLOCK_SIZE) as usize;
+            let block_buf = &mut buf[block_offset..block_offset + Self::BLOCK_SIZE as usize];
+            self.read_block(block_lba, block_buf).await?;
+        }
         Ok(())
     }
 }

@@ -7,7 +7,7 @@ use embassy_stm32::{
     peripherals::{self, ETH},
     usb::Driver,
 };
-use hasm_openbmc::{consts::IP, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack, storage::remote::RemoteBlockDevice};
+use hasm_openbmc::{block::{cached_data::CachedData, remote::RemoteBlockDevice}, consts::IP, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_time::Timer;
 use embassy_stm32::
@@ -54,7 +54,8 @@ async fn main(spawner: Spawner) {
 
     let ip = Ipv4Addr::new(192, 168, 1, 77);
     let port = 8000;
-    let mut bdev = RemoteBlockDevice::new(stack, ip, port);
+    let bdev = RemoteBlockDevice::new(stack, ip, port);
+    let mut cached_bdev = CachedData::new(bdev);
 
     let mut cbw_buf = [0u8; 31];
 
@@ -69,7 +70,7 @@ async fn main(spawner: Spawner) {
         };
 
         let cbw = Cbw::from_bytes(&cbw_buf);
-        let response = handle_scsi_cmd(&mut bdev, &mut msc_dev, cbw).await;
+        let response = handle_scsi_cmd(&mut cached_bdev, &mut msc_dev, cbw).await;
 
         let mut csw = [0u8; 13];
         csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
