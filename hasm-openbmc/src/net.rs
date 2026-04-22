@@ -7,6 +7,11 @@ use crate::config::static_ipv4_config;
 
 static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
 
+#[embassy_executor::task]
+pub async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH, GenericPhy>>) -> ! {
+    runner.run().await
+}
+
 pub fn init_eth_stack(device: Ethernet<'static, ETH, GenericPhy>) -> (
     Stack<'static>,
     Runner<'static, Ethernet<'static, ETH, GenericPhy>>

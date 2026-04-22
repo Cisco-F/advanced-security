@@ -3,18 +3,11 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::eth::{Ethernet, GenericPhy};
+use embassy_stm32::{eth::{Ethernet, GenericPhy}, peripherals::ETH};
 use embassy_time::{Timer, Duration};
 use hasm_openbmc::{drivers::ethernet::ethernet_device, hal::init::sys_init, net::init_eth_stack};
 use {defmt_rtt as _, panic_probe as _};
 
-
-type EthDevice = Ethernet<'static, embassy_stm32::peripherals::ETH, GenericPhy>;
-
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, EthDevice>) -> ! {
-    runner.run().await
-}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
