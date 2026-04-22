@@ -31,7 +31,6 @@ pub async fn power_task(mut power_control: PowerControl) -> ! {
 }
 
 pub struct PowerControl {
-    pub state: bool,
     power_off_pin: Output<'static>,
     power_on_pin: Output<'static>
 }
@@ -41,14 +40,13 @@ impl PowerControl {
         let power_off_pin = Output::new(power_off_pin, Level::High, Speed::Low);
         let power_on_pin = Output::new(power_on_pin, Level::High, Speed::Low);
         Self {
-            state: true,
             power_off_pin,
             power_on_pin
         }
     }
 
     pub async fn power_on(&mut self) {
-        if self.state {
+        if is_power_on() {
             info!("Power is already ON, ignoring power on request");
             return;
         }
@@ -57,13 +55,12 @@ impl PowerControl {
         self.power_on_pin.set_low();
         Timer::after_secs(3).await;
         self.power_on_pin.set_high();
-        self.state = true;
         info!("Power on complete");
         defmt::flush();
     }
 
     pub async fn power_off(&mut self) {
-        if !self.state {
+        if !is_power_on() {
             info!("Power is already OFF, ignoring power off request");
             return;
         }
@@ -72,7 +69,6 @@ impl PowerControl {
         self.power_off_pin.set_low();
         Timer::after_secs(3).await;
         self.power_off_pin.set_high();
-        self.state = false;
         info!("Power off complete");
         defmt::flush();
     }
