@@ -11,15 +11,10 @@ use embassy_executor::Spawner;
 use embassy_net::Ipv4Address;
 use embassy_stm32::eth;
 use hasm_openbmc::{
-    drivers::{ethernet::ethernet_device, uart::uart_init},
-    hal::init::sys_init,
-    net::{init_eth_stack, net_task},
-    services::console::console_task,
+    config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, uart::uart_init}, hal::init::sys_init, net::{init_eth_stack, net_task}, services::console::console_task
 };
 use {defmt_rtt as _, panic_probe as _};
 
-const IP_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 177);
-const UART_BAUDRATE: u32 = 115_200;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -31,6 +26,7 @@ async fn main(spawner: Spawner) {
     let (stack, runner) = init_eth_stack(eth_dev);
 
     unwrap!(spawner.spawn(net_task(runner)));
+    let IP_ADDR = get_ip();
     info!("network configured: {}", IP_ADDR);
     stack.wait_config_up().await;
 

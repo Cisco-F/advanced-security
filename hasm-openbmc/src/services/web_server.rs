@@ -2,7 +2,7 @@ use defmt::*;
 use embassy_net::{Stack, tcp::TcpSocket};
 use {defmt_rtt as _, panic_probe as _};
 
-use crate::{services::power_control::POWER_SIGNAL, utils::*};
+use crate::{services::power_control::{is_power_on, set_power_state}, utils::*};
 
 
 #[embassy_executor::task]
@@ -64,15 +64,15 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
         }
         // Redfish Systems, return power state
         ("GET", "/redfish/v1/Systems/1") => {
-            send_response(socket, 200, b"OK", dump_system_info("1").await.as_bytes()).await;
+            send_response(socket, 200, b"OK", dump_system_info("1", is_power_on()).as_bytes()).await;
         }
         // power control
         ("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset") => {
             if req_str.contains("\"ResetType\":\"On\"") {
-                POWER_SIGNAL.signal(true);
+                set_power_state(true);
                 send_response(socket, 200, b"OK", b"Power On!").await;
             } else if req_str.contains("\"ResetType\":\"ForceOff\"") {
-                POWER_SIGNAL.signal(false);
+                set_power_state(false);
                 send_response(socket, 200, b"OK", b"Force Power Off!").await;
             } else {
                 send_response(socket, 404, b"Not Found", b"").await;

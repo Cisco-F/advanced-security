@@ -54,8 +54,15 @@ pub fn format_ip(ip: Ipv4Address, out: &mut [u8]) -> &[u8] {
     &out[..idx]
 }
 
-pub async fn dump_system_info(_system_id: &str) -> &'static str {
-    r##"{
+pub fn dump_system_info(_system_id: &str, power_on: bool) -> &'static str {
+    if power_on {
+        SYSTEM_INFO_ON
+    } else {
+        SYSTEM_INFO_OFF
+    }
+}
+
+static SYSTEM_INFO_ON: &str = r##"{
         "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
         "@odata.id": "/redfish/v1/Systems/1",
         "Id": "1",
@@ -71,4 +78,22 @@ pub async fn dump_system_info(_system_id: &str) -> &'static str {
             }
         }
     }"##
-}
+;
+
+static SYSTEM_INFO_OFF: &str = r##"{
+        "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
+        "@odata.id": "/redfish/v1/Systems/1",
+        "Id": "1",
+        "Name": "Main System",
+        "PowerState": "Off",
+        "Actions": {
+            "#ComputerSystem.Reset": {
+                "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset",
+                "ResetType@Redfish.AllowableValues": [
+                    "On",
+                    "ForceOff",
+                ]
+            }
+        }
+    }"##
+;

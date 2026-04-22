@@ -26,3 +26,12 @@ pub fn static_ipv4_config() -> embassy_net::Config {
     };
     embassy_net::Config::ipv4_static(static_config)
 }
+
+pub fn get_ip() -> Ipv4Addr {
+    Ipv4Addr::new(
+        IP[0],
+        IP[1],
+        IP[2],
+        IP[3]
+    )
+}
