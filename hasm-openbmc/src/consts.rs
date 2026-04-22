@@ -4,3 +4,4 @@ pub const GATEWAY: [u8; 4] = [192, 168, 1, 1];
 pub const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
 pub const UART_BAUDRATE: u32 = 115_200;
+pub const TELNET_PORT: u16 = 2323;

@@ -3,14 +3,15 @@ use embassy_futures::select::{select, Either};
 use embassy_net::{Stack, tcp::TcpSocket};
 use embassy_stm32::usart::BufferedUart;
 use embedded_io_async::{Read, Write};
+use crate::consts::TELNET_PORT;
+
 use {defmt_rtt as _, panic_probe as _};
 
-const CONSOLE_PORT: u16 = 2323;
 
-/// Telnet console task: bridges a TCP client on CONSOLE_PORT to a UART device.
+/// Telnet console task: bridges a TCP client on TELNET_PORT to a UART device.
 #[embassy_executor::task]
 pub async fn console_task(mut uart: BufferedUart<'static>, stack: Stack<'static>) {
-    info!("UART console listening on port {}", CONSOLE_PORT);
+    info!("UART console listening on port {}", TELNET_PORT);
 
     let mut socket_rx_buffer = [0u8; 1024];
     let mut socket_tx_buffer = [0u8; 1024];
@@ -19,7 +20,7 @@ pub async fn console_task(mut uart: BufferedUart<'static>, stack: Stack<'static>
         let mut socket = TcpSocket::new(stack, &mut socket_rx_buffer, &mut socket_tx_buffer);
         socket.set_keep_alive(Some(embassy_time::Duration::from_secs(10)));
 
-        if let Err(e) = socket.accept(CONSOLE_PORT).await {
+        if let Err(e) = socket.accept(TELNET_PORT).await {
             warn!("accept error: {:?}", e);
             continue;
         }

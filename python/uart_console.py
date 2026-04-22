@@ -11,18 +11,21 @@ import json
 if sys.platform == "win32":
     import msvcrt
 
+# 受控板ip
 HOST = "192.168.1.177"
+# 受控板telnet端口
 PORT = 2323
+# 受控板HTTP服务端口（电源控制等）
 HTTP_PORT = 80
 
-MENU = """
+MENU = f"""
 ╔══════════════════════════════╗
 ║      UART Console Client     ║
 ║  1. Ping                     ║
 ║  2. Get power state          ║
 ║  3. Power on                 ║
 ║  4. Power off                ║
-║  5. Connect  (192.168.1.177) ║
+║  5. Connect                  ║
 ║  6. Exit                     ║
 ╚══════════════════════════════╝
 """

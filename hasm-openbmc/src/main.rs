@@ -4,11 +4,11 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    bind_interrupts, eth::{self, Ethernet, GenericPhy}, gpio::{Level, Speed}, peripherals::ETH
+    eth::{Ethernet, GenericPhy}, gpio::{Level, Speed}, peripherals::ETH
 };
 use {defmt_rtt as _, panic_probe as _};
 
-use hasm_openbmc::{config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, led::{led_init, led_task}, uart::uart_init}, hal::init::sys_init, net::init_eth_stack, services::{console::console_task, power_control::{PowerControl, power_task}, web_server::http_task}};
+use hasm_openbmc::{block::{cached_data::CachedData, tf::TfBlockDevice}, config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, led::{led_init, led_task}, uart::uart_init, usb_msc::device::MSCDev}, hal::init::sys_init, net::init_eth_stack, services::{console::console_task, power_control::{PowerControl, power_task}, virtual_usb::usb_task, web_server::http_task}};
 
 
 #[embassy_executor::task]
@@ -34,10 +34,9 @@ async fn main(spawner: Spawner) {
     );
 
     let (stack, runner) = init_eth_stack(eth_device);
+    stack.wait_config_up().await;
     unwrap!(spawner.spawn(net_task(runner)));
 
-    stack.wait_config_up().await;
-    
     // 串口控制初始化
     let ip = get_ip();
     let uart = uart_init(p.USART1, p.PA10, p.PA9, UART_BAUDRATE);
@@ -54,5 +53,32 @@ async fn main(spawner: Spawner) {
     let _ = unwrap!(spawner.spawn(http_task(stack)));
     let _ = unwrap!(spawner.spawn(power_task(power_control)));
     let _ = unwrap!(spawner.spawn(led_task(led)));
+
+    // usb_msc模拟设备初始化
+    let mut msc_dev = MSCDev::init();
+    msc_dev.new(p.USB_OTG_FS, p.PA12, p.PA11);
+    
+    let mut bdev = TfBlockDevice::new();
+    match bdev.init(
+        p.SDIO, 
+        p.DMA2_CH3, 
+        p.PC12, 
+        p.PD2, 
+        p.PC8, 
+        p.PC9, 
+        p.PC10, 
+        p.PC11,
+    ).await {
+        Ok(_) => info!("TF Card init OK"),
+        Err(_) => {
+            error!("TF Card init failed");
+            return;
+        }
+    }
+    
+    let cached_bdev = CachedData::new(bdev);
+    unwrap!(spawner.spawn(usb_task(cached_bdev, msc_dev)));
+
+    info!("✓ USB MSC device ready!");
 
 }

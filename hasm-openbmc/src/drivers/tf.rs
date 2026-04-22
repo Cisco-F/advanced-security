@@ -12,11 +12,11 @@ bind_interrupts!(struct TfIrqs {
     SDIO => sdmmc::InterruptHandler<peripherals::SDIO>;
 });
 
-pub struct TfCard<'d> {
-    sdmmc: Option<Sdmmc<'d, peripherals::SDIO>>,
+pub struct TfCard {
+    sdmmc: Option<Sdmmc<'static, peripherals::SDIO>>,
 }
 
-impl<'d> TfCard<'d> {
+impl TfCard {
     pub fn new() -> Self {
         Self { sdmmc: None }
     }

@@ -130,8 +130,7 @@ impl ScsiDataSink for MSCDev<Driver<'static, USB_OTG_FS>> {
         let n = match ep_out.read(buf).await {
             Ok(n) => n,
             Err(e) => {
-                warn!("MSC OUT read error: {:?}", e);
-                return Err(EndpointError::Disabled);
+                return Err(e);
             }
         };
 

@@ -6,11 +6,11 @@ use embassy_stm32::{
 use crate::{drivers::tf::TfCard, block::BlockDevice};
 
 
-pub struct TfBlockDevice<'d> {
-	inner: TfCard<'d>,
+pub struct TfBlockDevice {
+	inner: TfCard,
 }
 
-impl<'d> TfBlockDevice<'d> {
+impl TfBlockDevice {
 	pub fn new() -> Self {
 		Self { inner: TfCard::new() }
 	}
@@ -38,7 +38,7 @@ impl<'d> TfBlockDevice<'d> {
 	}
 }
 
-impl<'d> BlockDevice for TfBlockDevice<'d> {
+impl BlockDevice for TfBlockDevice {
 	async fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
 		self.inner.read_block(lba, buf).await?;
 		Ok(())

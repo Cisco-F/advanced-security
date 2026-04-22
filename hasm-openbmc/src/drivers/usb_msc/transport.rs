@@ -1,6 +1,6 @@
 use defmt::warn;
 
-use crate::drivers::usb_msc::scsi::CBW_SIGNATURE;
+use crate::drivers::usb_msc::scsi::{CBW_SIGNATURE, CSW_SIGNATURE};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(4))]
@@ -53,5 +53,32 @@ impl Cbw {
             cb_len,
             cmd
         }
+    }
+}
+
+pub struct Csw {
+    pub signature: u32,
+    pub tag: u32,
+    pub residue: u32,
+    pub status: u8,
+}
+
+impl Csw {
+    pub fn new(tag: u32, residue: u32, status: u8) -> Self {
+        Self {
+            signature: CSW_SIGNATURE,
+            tag,
+            residue,
+            status,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 13] {
+        let mut buf = [0u8; 13];
+        buf[0..4].copy_from_slice(&self.signature.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.tag.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.residue.to_le_bytes());
+        buf[12] = self.status;
+        buf
     }
 }
