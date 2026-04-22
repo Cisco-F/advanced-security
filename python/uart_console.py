@@ -18,11 +18,12 @@ HTTP_PORT = 80
 MENU = """
 ╔══════════════════════════════╗
 ║      UART Console Client     ║
-║  1. Get power state          ║
-║  2. Power on                 ║
-║  3. Power off                ║
-║  4. Connect  (192.168.1.177) ║
-║  5. Exit                     ║
+║  1. Ping                     ║
+║  2. Get power state          ║
+║  3. Power on                 ║
+║  4. Power off                ║
+║  5. Connect  (192.168.1.177) ║
+║  6. Exit                     ║
 ╚══════════════════════════════╝
 """
 
@@ -51,14 +52,8 @@ def _wait_key_and_back_to_menu():
     _clear_screen()
 
 
-def _print_http_response(resp: str):
-    status_line = resp.split("\r\n", 1)[0] if resp else ""
-    body = resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
-    print("\n===== HTTP RESPONSE =====")
-    print(status_line if status_line else "(empty status)")
-    print("----- BODY -----")
-    print(body if body else "(empty body)")
-    print("=========================\n")
+def _body(resp: str) -> str:
+    return resp.split("\r\n\r\n", 1)[1].strip() if "\r\n\r\n" in resp else resp.strip()
 
 
 def _http_request(method: str, path: str, body: str = "") -> str:
@@ -108,27 +103,41 @@ def _http_request(method: str, path: str, body: str = "") -> str:
         return full.decode("utf-8", errors="replace")
 
 
+def ping():
+    try:
+        resp = _http_request("GET", "/ping")
+    except OSError as e:
+        print(f"[错误] {e}")
+        _wait_key_and_back_to_menu()
+        return
+    print(_body(resp))
+    _wait_key_and_back_to_menu()
+
+
 def get_power_state():
     try:
         resp = _http_request("GET", "/redfish/v1/Systems/1")
     except OSError as e:
-        print(f"\n[HTTP 请求失败] {e}\n")
+        print(f"[错误] {e}")
         _wait_key_and_back_to_menu()
         return
-    _print_http_response(resp)
+    body = _body(resp)
+    # 提取 PowerState 字段值
+    import re as _re
+    m = _re.search(r'"PowerState"\s*:\s*"([^"]+)"', body)
+    print(m.group(1) if m else body)
     _wait_key_and_back_to_menu()
 
 
 def set_power(reset_type: str, label: str):
-    body = json.dumps({"ResetType": reset_type}, separators=(",", ":"))
+    payload = json.dumps({"ResetType": reset_type}, separators=(",", ":"))
     try:
-        resp = _http_request("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", body)
+        resp = _http_request("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", payload)
     except OSError as e:
-        print(f"\n[HTTP 请求失败] {e}\n")
+        print(f"[错误] {e}")
         _wait_key_and_back_to_menu()
         return
-    print(f"\n[{label}] 请求完成")
-    _print_http_response(resp)
+    print(_body(resp))
     _wait_key_and_back_to_menu()
 
 def strip_telnet_negotiation(data: bytes) -> bytes:
@@ -196,15 +205,10 @@ def _send_keys_windows(sock: socket.socket):
             _ = msvcrt.getwch()
             continue
 
-        # Ctrl+C: 中断会话
-        if ch == "\x03":
-            _stop_event.set()
-            break
-
-        # 屏蔽终端回注 CPR（ESC [ rows ; cols R）
+        # 屏蔽终端回注 CPR（ESC [ rows ; cols R）并支持单独按 ESC 退出会话
         if ch == "\x1b":
             seq = [ch]
-            # 尝试读取形如 ESC [ 1 ; 14 R 的短序列
+            # 尝试读取可能跟随的序列（短序列），如果没有随后的按键，seq_s 将仅为 "\x1b"
             for _ in range(16):
                 if msvcrt.kbhit():
                     seq.append(msvcrt.getwch())
@@ -213,8 +217,13 @@ def _send_keys_windows(sock: socket.socket):
                 else:
                     break
             seq_s = "".join(seq)
+            # 如果是 CPR 响应则忽略
             if re.fullmatch(r"\x1b\[\d+;\d+R", seq_s):
                 continue
+            # 单独的 ESC 键 -> 退出会话（不转发）
+            if seq_s == "\x1b":
+                _stop_event.set()
+                break
             data = seq_s.encode("utf-8", errors="ignore")
         elif ch in ("\r", "\n"):
             data = b"\n"
@@ -234,7 +243,8 @@ def _send_keys_windows(sock: socket.socket):
 
 
 def connect():
-    print(f"\n正在连接 {HOST}:{PORT} ...\n")
+    _clear_screen()
+    print(f"正在连接 {HOST}:{PORT} ...\n")
     try:
         sock = socket.create_connection((HOST, PORT), timeout=5)
     except OSError as e:
@@ -247,7 +257,7 @@ def connect():
     recv_t = threading.Thread(target=_recv_thread, args=(sock,), daemon=True)
     recv_t.start()
 
-    print("已连接。现在是逐字符发送模式（按键立即生效）。按 Ctrl+C 结束会话。\n")
+    print("按 Ctrl+C 结束会话。\n")
 
     try:
         if sys.platform == "win32":
@@ -272,7 +282,7 @@ def connect():
         _stop_event.set()
         sock.close()
         recv_t.join(timeout=1)
-        print("\n会话结束。\n")
+        _clear_screen()
 
 # ── 主菜单 ───────────────────────────────────────────────────────────────────
 
@@ -285,18 +295,20 @@ def main():
         print(MENU)
         choice = input("请选择: ").strip()
         if choice == "1":
-            get_power_state()
+            ping()
         elif choice == "2":
-            set_power("On", "Power on")
+            get_power_state()
         elif choice == "3":
-            set_power("ForceOff", "Power off")
+            set_power("On", "Power on")
         elif choice == "4":
-            connect()
+            set_power("ForceOff", "Power off")
         elif choice == "5":
+            connect()
+        elif choice == "6":
             print("再见！")
             sys.exit(0)
         else:
-            print("无效输入，请输入 1-5。\n")
+            print("无效输入，请输入 1-6。\n")
 
 
 if __name__ == "__main__":
