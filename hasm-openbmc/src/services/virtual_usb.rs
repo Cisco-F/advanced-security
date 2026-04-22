@@ -11,6 +11,14 @@ use crate::drivers::usb_msc::transport::Cbw;
 use crate::drivers::usb_msc::transport::Csw;
 use embassy_stm32::usb::Driver;
 use embassy_stm32::peripherals::USB_OTG_FS;
+use embassy_usb::UsbDevice;
+
+#[embassy_executor::task]
+pub async fn usb_device_task(
+    mut usb: UsbDevice<'static, Driver<'static, USB_OTG_FS>>,
+) -> ! {
+    usb.run().await
+}
 
 #[embassy_executor::task]
 pub async fn usb_task(mut cached_bdev: CachedData<TfBlockDevice>, mut sink: MSCDev<Driver<'static, USB_OTG_FS>>) -> ! {

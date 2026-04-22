@@ -3,18 +3,11 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{
-    eth::{Ethernet, GenericPhy}, gpio::{Level, Speed}, peripherals::ETH
-};
+use embassy_stm32::gpio::{Level, Speed};
 use {defmt_rtt as _, panic_probe as _};
 
-use hasm_openbmc::{block::{cached_data::CachedData, tf::TfBlockDevice}, config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, led::{led_init, led_task}, uart::uart_init, usb_msc::device::MSCDev}, hal::init::sys_init, net::init_eth_stack, services::{console::console_task, power_control::{PowerControl, power_task}, virtual_usb::usb_task, web_server::http_task}};
+use hasm_openbmc::{block::{cached_data::CachedData, tf::TfBlockDevice}, config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, led::{led_init, led_task}, uart::uart_init, usb_msc::device::MSCDev}, hal::init::sys_init, net::{init_eth_stack, net_task}, services::{console::console_task, power_control::{PowerControl, power_task}, virtual_usb::{usb_device_task, usb_task}, web_server::http_task}};
 
-
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH, GenericPhy>>) -> ! {
-    runner.run().await
-}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -57,6 +50,14 @@ async fn main(spawner: Spawner) {
     // usb_msc模拟设备初始化
     let mut msc_dev = MSCDev::init();
     msc_dev.new(p.USB_OTG_FS, p.PA12, p.PA11);
+    let usb = match msc_dev.usb_device.take() {
+        Some(usb) => usb,
+        None => {
+            error!("USB device build failed");
+            return;
+        }
+    };
+    unwrap!(spawner.spawn(usb_device_task(usb)));
     
     let mut bdev = TfBlockDevice::new();
     match bdev.init(
