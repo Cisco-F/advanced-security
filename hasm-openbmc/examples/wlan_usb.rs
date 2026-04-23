@@ -7,7 +7,7 @@ use embassy_stm32::{
     peripherals::{self, ETH},
     usb::Driver,
 };
-use hasm_openbmc::{block::{cached_data::CachedData, remote::RemoteBlockDevice}, consts::IP, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack};
+use hasm_openbmc::{block::{cached_data::CachedData, remote::RemoteBlockDevice}, consts::BOARD_IP, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_time::Timer;
 use embassy_stm32::

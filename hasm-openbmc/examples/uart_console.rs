@@ -1,79 +1,27 @@
-//! 接线说明
-//! 树莓派 UART0 TXD -> STM32 PA10 (USART1_RX)
-//! 树莓派 UART0 RXD -> STM32 PA9 (USART1_TX)
-//! 树莓派 GND -> STM32 GND
-//! 树莓派与stm32需在同一局域网，本例程stm32静态ip为192.168.1.177
 #![no_std]
 #![no_main]
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
-use embassy_net::{tcp::TcpSocket, Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
-use embassy_stm32::{
-    bind_interrupts,
-    eth::{self, Ethernet, GenericPhy, PacketQueue},
-    peripherals::{ETH, USART1},
-    rcc::*,
-    time::Hertz,
-    usart::{self, BufferedUart, Config as UartConfig},
-    Config as StmConfig,
-};
-use embedded_io_async::{Read, Write};
-use heapless::Vec;
-use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-
-bind_interrupts!(struct Irqs {
-    ETH => eth::InterruptHandler;
-    USART1 => usart::BufferedInterruptHandler<USART1>;
-});
-
-static PACKETS: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
-static NET_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
-static UART_TX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-static UART_RX_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
-
-const IP_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 177);
-const GATEWAY: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
-const UART_BAUDRATE: u32 = 115_200;
-const CONSOLE_PORT: u16 = 2323;
-
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH, GenericPhy>>) -> ! {
-    runner.run().await
-}
+use hasm_openbmc::{
+    config::get_board_ip,
+    consts::UART_BAUDRATE,
+    drivers::{
+        ethernet::ethernet_device,
+        uart::uart_init,
+    },
+    hal::init::sys_init,
+    net::{init_eth_stack, net_task},
+    services::console::console_task
+};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let mut config = StmConfig::default();
-    {
-        config.rcc.hse = Some(Hse {
-            freq: Hertz(25_000_000),
-            mode: HseMode::Oscillator,
-        });
-        config.rcc.pll_src = PllSource::HSE;
-        config.rcc.pll = Some(Pll {
-            prediv: PllPreDiv::DIV25,
-            mul: PllMul::MUL336,
-            divp: Some(PllPDiv::DIV2),
-            divq: Some(PllQDiv::DIV7),
-            divr: None,
-        });
-        config.rcc.sys = Sysclk::PLL1_P;
-        config.rcc.ahb_pre = AHBPrescaler::DIV1;
-        config.rcc.apb1_pre = APBPrescaler::DIV4;
-        config.rcc.apb2_pre = APBPrescaler::DIV2;
-    }
-    let p = embassy_stm32::init(config);
+    let p = sys_init();
 
-    info!("UART bridge booting...");
-
-    let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-    let device = Ethernet::new(
-        PACKETS.init(PacketQueue::new()),
+    let eth_device = ethernet_device(
         p.ETH,
-        Irqs,
         p.PA1,
         p.PA2,
         p.PC1,
@@ -83,163 +31,21 @@ async fn main(spawner: Spawner) {
         p.PG13,
         p.PG14,
         p.PG11,
-        GenericPhy::new(0),
-        mac,
     );
 
-    let cidr = Ipv4Cidr::new(IP_ADDR, 24);
-    let dns_servers: Vec<Ipv4Address, 3> = Vec::new();
-    let static_config = StaticConfigV4 {
-        address: cidr,
-        gateway: Some(GATEWAY),
-        dns_servers,
-    };
-    let net_config = embassy_net::Config::ipv4_static(static_config);
-    let (stack, runner) = embassy_net::new(
-        device,
-        net_config,
-        NET_RESOURCES.init(StackResources::new()),
-        0x1234_5678,
-    );
-
-    unwrap!(spawner.spawn(net_task(runner)));
-    info!("network configured: {}", IP_ADDR);
+    let (stack, runner) = init_eth_stack(eth_device);
     stack.wait_config_up().await;
+    unwrap!(spawner.spawn(net_task(runner)));
 
-    while !stack.is_link_up() {
-        warn!("ethernet link is not ready, retrying...");
-        embassy_time::Timer::after_secs(1).await;
-    }
-
-    let mut uart_cfg = UartConfig::default();
-    uart_cfg.baudrate = UART_BAUDRATE;
-
-    let mut uart = unwrap!(BufferedUart::new(
-        p.USART1,
-        p.PA10,
-        p.PA9,
-        UART_TX_BUF.init([0; 256]),
-        UART_RX_BUF.init([0; 1024]),
-        Irqs,
-        uart_cfg,
-    ));
-
+    // 串口控制初始化
+    let ip = get_board_ip();
+    let uart = uart_init(p.USART1, p.PA10, p.PA9, UART_BAUDRATE);
     info!("UART ready: Raspberry Pi TXD -> STM32 PA10 (USART1_RX)");
     info!("UART ready: optional Raspberry Pi RXD -> STM32 PA9 (USART1_TX)");
-    info!("UART ready: open tcp://{}:{} before powering on the Raspberry Pi", IP_ADDR, CONSOLE_PORT);
+    info!("UART ready: open tcp://{}:{} before powering on the Raspberry Pi", ip, UART_BAUDRATE);
 
-    let mut socket_rx_buffer = [0u8; 1024];
-    let mut socket_tx_buffer = [0u8; 1024];
+    unwrap!(spawner.spawn(console_task(uart, stack)));
 
-    loop {
-        let mut socket = TcpSocket::new(stack, &mut socket_rx_buffer, &mut socket_tx_buffer);
-        socket.set_keep_alive(Some(embassy_time::Duration::from_secs(10)));
+    info!("✓ UART console ready!");
 
-        info!("UART console listening on {}:{}", IP_ADDR, CONSOLE_PORT);
-        if let Err(e) = socket.accept(CONSOLE_PORT).await {
-            warn!("accept error: {:?}", e);
-            continue;
-        }
-
-        info!("console client connected: {:?}", socket.remote_endpoint());
-
-        if let Err(e) = socket
-            .write_all(b"STM32 UART bridge connected. Waiting for Raspberry Pi boot log...\r\n")
-            .await
-        {
-            warn!("banner write error: {:?}", e);
-            socket.abort();
-            let _ = socket.flush().await;
-            continue;
-        }
-
-        // attempt basic telnet negotiation to request character mode
-        let _ = socket.write_all(&[255u8, 253u8, 3u8, 255u8, 251u8, 1u8]).await;
-
-        match bridge_session(&mut uart, &mut socket).await {
-            Ok(()) => info!("console client closed"),
-            Err(()) => warn!("console session ended"),
-        }
-
-        socket.abort();
-        let _ = socket.flush().await;
-    }
-}
-
-async fn bridge_session<'d>(uart: &mut BufferedUart<'d>, socket: &mut TcpSocket<'_>) -> Result<(), ()> {
-    // Split halves
-    let (mut reader, mut writer) = socket.split();
-    let (mut tx, mut rx) = uart.split_ref();
-
-    let uart_to_tcp = async {
-        let mut buf = [0u8; 128];
-        loop {
-            let n = match rx.read(&mut buf).await {
-                Ok(n) => n,
-                Err(_) => return Err(()),
-            };
-            if n == 0 {
-                continue;
-            }
-            if writer.write_all(&buf[..n]).await.is_err() {
-                return Err(());
-            }
-        }
-    };
-
-    let tcp_to_uart = async {
-        let mut inbuf = [0u8; 256];
-        let mut out = [0u8; 512];
-        loop {
-            let n = match reader.read(&mut inbuf).await {
-                Ok(n) => n,
-                Err(_) => return Err(()),
-            };
-            if n == 0 {
-                // client closed
-                return Err(());
-            }
-
-            // map/delete processing: DEL(0x7f)->BS(0x08), normalize CR/CRLF->LF
-            let mut wi = 0usize;
-            let mut i = 0usize;
-            while i < n {
-                let b = inbuf[i];
-                if b == 0x7f {
-                    out[wi] = 0x08;
-                    wi += 1;
-                    i += 1;
-                    continue;
-                }
-                if b == b'\r' {
-                    // if CRLF, consume both and send single LF
-                    if i + 1 < n && inbuf[i + 1] == b'\n' {
-                        out[wi] = b'\n';
-                        wi += 1;
-                        i += 2;
-                        continue;
-                    } else {
-                        out[wi] = b'\n';
-                        wi += 1;
-                        i += 1;
-                        continue;
-                    }
-                }
-                out[wi] = b;
-                wi += 1;
-                i += 1;
-            }
-
-            if wi > 0 {
-                if tx.write_all(&out[..wi]).await.is_err() {
-                    return Err(());
-                }
-            }
-        }
-    };
-
-    match select(uart_to_tcp, tcp_to_uart).await {
-        Either::First(r) => r,
-        Either::Second(r) => r,
-    }
 }

@@ -5,9 +5,25 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Speed};
 use {defmt_rtt as _, panic_probe as _};
-
-use hasm_openbmc::{block::{cached_data::CachedData, tf::TfBlockDevice}, config::get_ip, consts::UART_BAUDRATE, drivers::{ethernet::ethernet_device, led::{led_init, led_task}, uart::uart_init, usb_msc::device::MSCDev}, hal::init::sys_init, net::{init_eth_stack, net_task}, services::{console::console_task, power_control::{PowerControl, power_task}, virtual_usb::{usb_device_task, usb_task}, web_server::http_task}};
-
+use hasm_openbmc::{
+    block::{cached_data::CachedData, remote::RemoteBlockDevice},
+    config::{get_board_ip, get_host_ip},
+    consts::{IMG_SERVER_PORT, UART_BAUDRATE},
+    drivers::{
+        ethernet::ethernet_device,
+        led::{led_init, led_task},
+        uart::uart_init,
+        usb_msc::device::MSCDev,
+    },
+    hal::init::sys_init,
+    net::{init_eth_stack, net_task},
+    services::{
+        console::console_task,
+        power_control::{PowerControl, power_task},
+        virtual_usb::{remote_usb_task, usb_device_task},
+        web_server::http_task,
+    },
+};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -31,11 +47,11 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(net_task(runner)));
 
     // 串口控制初始化
-    let ip = get_ip();
+    let ip = get_board_ip();
     let uart = uart_init(p.USART1, p.PA10, p.PA9, UART_BAUDRATE);
     info!("UART ready: Raspberry Pi TXD -> STM32 PA10 (USART1_RX)");
     info!("UART ready: optional Raspberry Pi RXD -> STM32 PA9 (USART1_TX)");
-    info!("UART ready: open tcp://{}:2323 before powering on the Raspberry Pi", ip);
+    info!("UART ready: open tcp://{}:{} before powering on the Raspberry Pi", ip, UART_BAUDRATE);
 
     unwrap!(spawner.spawn(console_task(uart, stack)));
 
@@ -59,26 +75,12 @@ async fn main(spawner: Spawner) {
     };
     unwrap!(spawner.spawn(usb_device_task(usb)));
     
-    let mut bdev = TfBlockDevice::new();
-    match bdev.init(
-        p.SDIO, 
-        p.DMA2_CH3, 
-        p.PC12, 
-        p.PD2, 
-        p.PC8, 
-        p.PC9, 
-        p.PC10, 
-        p.PC11,
-    ).await {
-        Ok(_) => info!("TF Card init OK"),
-        Err(_) => {
-            error!("TF Card init failed");
-            return;
-        }
-    }
-    
+    let ip = get_host_ip();
+    let port = IMG_SERVER_PORT;
+    let bdev = RemoteBlockDevice::new(stack, ip, port);
     let cached_bdev = CachedData::new(bdev);
-    unwrap!(spawner.spawn(usb_task(cached_bdev, msc_dev)));
+    
+    unwrap!(spawner.spawn(remote_usb_task(cached_bdev, msc_dev)));
 
     info!("✓ USB MSC device ready!");
 
