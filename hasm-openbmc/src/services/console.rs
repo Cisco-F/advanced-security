@@ -8,7 +8,6 @@ use crate::consts::TELNET_PORT;
 use {defmt_rtt as _, panic_probe as _};
 
 
-/// Telnet console task: bridges a TCP client on TELNET_PORT to a UART device.
 #[embassy_executor::task]
 pub async fn console_task(mut uart: BufferedUart<'static>, stack: Stack<'static>) {
     info!("UART console listening on port {}", TELNET_PORT);

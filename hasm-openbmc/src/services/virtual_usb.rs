@@ -22,25 +22,21 @@ pub async fn usb_device_task(
     usb.run().await
 }
 
-/// 外层 Embassy task：TfBlockDevice
 #[embassy_executor::task]
 pub async fn tf_usb_task(bdev: CachedData<TfBlockDevice>, sink: MSCDev<Driver<'static, USB_OTG_FS>>) -> ! {
     run_usb(bdev, sink).await
 }
 
-/// 外层 Embassy task：RemoteBlockDevice
 #[embassy_executor::task]
 pub async fn remote_usb_task(bdev: CachedData<RemoteBlockDevice>, sink: MSCDev<Driver<'static, USB_OTG_FS>>) -> ! {
     run_usb(bdev, sink).await
 }
 
-/// 外层 Embassy task：ExampleBlockDevice
 #[embassy_executor::task]
 pub async fn example_usb_task(bdev: CachedData<ExampleBlockDevice>, sink: MSCDev<Driver<'static, USB_OTG_FS>>) -> ! {
     run_usb(bdev, sink).await
 }
 
-/// 内层泛型函数：所有 USB MSC 处理逻辑在此，与具体设备类型无关
 async fn run_usb<D: BlockDevice>(mut cached_bdev: CachedData<D>, mut sink: MSCDev<Driver<'static, USB_OTG_FS>>) -> ! {
     let mut cbw_buf = [0u8; 31];
 

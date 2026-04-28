@@ -60,7 +60,6 @@ pub(crate) async fn mode_sense_6(sink: &mut impl ScsiDataSink) -> ScsiResponse {
     }
 }
 
-/// 返回设备支持的容量格式列表
 pub(crate) async fn read_format_capacities(sink: &mut impl ScsiDataSink) -> ScsiResponse {
     debug!("SCSI READ FORMAT CAPACITIES");
     let mut resp = [0u8; 12];
@@ -85,7 +84,6 @@ pub(crate) async fn read_format_capacities(sink: &mut impl ScsiDataSink) -> Scsi
     }
 }
 
-/// 返回设备的总容量和每个块的大小
 pub(crate) async fn read_capacity_10(sink: &mut impl ScsiDataSink) -> ScsiResponse {
     debug!("SCSI READ CAPACITY(10)");
     let mut resp = [0u8; 8];
@@ -106,8 +104,6 @@ pub(crate) async fn read_capacity_10(sink: &mut impl ScsiDataSink) -> ScsiRespon
     }
 }
 
-/// Read data from usb
-/// TODO
 pub(crate) async fn read_10<B: BlockDevice>(
     block_device: &mut B,
     sink: &mut impl ScsiDataSink,

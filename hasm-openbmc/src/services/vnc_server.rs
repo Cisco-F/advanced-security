@@ -59,7 +59,6 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
     let _ = socket.write_all(&server_init).await;
     info!("✓ Server Init Sent. Entering Event Loop!");
 
-    // [修复] 保存客户端实际请求的像素位数，避免客户端按其它格式解析而崩溃
     let mut current_bpp = 32u8;
 
     loop {
@@ -109,7 +108,6 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                 let req_w = u16::from_be_bytes([payload[5], payload[6]]);
                 let req_h = u16::from_be_bytes([payload[7], payload[8]]);
                 
-                // 限制在你的 SCREEN 范围内
                 let start_x = req_x.min(SCREEN_WIDTH);
                 let start_y = req_y.min(SCREEN_HEIGHT);
                 let width = req_w.min(SCREEN_WIDTH - start_x);
@@ -132,7 +130,6 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                 let _ = socket.write_all(&header).await;
                 
                 let bytes_per_pixel = ((current_bpp / 8) as usize).max(1);
-                // 声明单行缓冲区，200 宽 * 4 bytes = 800 bytes，完全不会撑爆 STM32 的栈
                 let mut line = [0u8; 800]; 
                 
                 for y in start_y..(start_y + height) {
@@ -140,7 +137,6 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                         let [r, g, b] = generate_gradient_pixel(start_x + x, start_y + y);
                         let i = (x as usize) * bytes_per_pixel;
                         
-                        // 动态适应客户端要求的像素尺寸
                         if bytes_per_pixel == 4 { // 32位 BGRA
                             line[i + 0] = b;
                             line[i + 1] = g;
@@ -152,7 +148,7 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                             line[i + 0] = bytes[0];
                             line[i + 1] = bytes[1];
                         } else { 
-                            line[i] = g; // 随便给个灰色防崩溃
+                            line[i] = g; 
                         }
                     }
                     let _ = socket.write_all(&line[..(width as usize * bytes_per_pixel)]).await;
