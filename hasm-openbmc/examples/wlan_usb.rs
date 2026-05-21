@@ -1,13 +1,18 @@
 #![no_std]
 #![no_main]
 
+//! Manual remote-image USB MSC experiment.
+//!
+//! Wires `RemoteBlockDevice` directly into the SCSI loop and builds CSW packets
+//! by hand, which makes it useful for debugging USB MSC transport behavior.
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     peripherals::{self, ETH},
     usb::Driver,
 };
-use hasm_openbmc::{block::{cached_data::CachedData, remote::RemoteBlockDevice}, consts::BOARD_IP, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack};
+use hasm_openbmc::{block::{cached_data::CachedData, remote::RemoteBlockDevice}, drivers::{ethernet::ethernet_device, usb_msc::{device::ScsiDataSink, scsi::{CSW_SIGNATURE, handle_scsi_cmd}, transport::Cbw}}, hal::init::sys_init, net::init_eth_stack};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_time::Timer;
 use embassy_stm32::
@@ -31,7 +36,6 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Ethernet<'static, ETH
 async fn main(spawner: Spawner) {
     let p = sys_init();
 
-    // 网络初始化
     let eth_device = ethernet_device(
         p.ETH,
         p.PA1,
@@ -47,7 +51,6 @@ async fn main(spawner: Spawner) {
     let (stack, runner) = init_eth_stack(eth_device);
     unwrap!(spawner.spawn(net_task(runner)));
 
-    // 创建msc设备
     let mut msc_dev = hasm_openbmc::drivers::usb_msc::device::MSCDev::init();
     msc_dev.new(p.USB_OTG_FS, p.PA12, p.PA11);
     unwrap!(spawner.spawn(usb_task(msc_dev.usb_device.take().unwrap())));
@@ -72,6 +75,7 @@ async fn main(spawner: Spawner) {
         let cbw = Cbw::from_bytes(&cbw_buf);
         let response = handle_scsi_cmd(&mut cached_bdev, &mut msc_dev, cbw).await;
 
+        // Keep CSW construction visible for transport debugging.
         let mut csw = [0u8; 13];
         csw[0..4].copy_from_slice(&CSW_SIGNATURE.to_le_bytes());
         csw[4..8].copy_from_slice(&cbw.tag.to_le_bytes());

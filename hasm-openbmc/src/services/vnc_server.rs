@@ -1,3 +1,16 @@
+//! Experimental VNC/RFB service.
+//!
+//! This task implements a very small subset of RFB 3.8 for diagnostics: it
+//! accepts a no-auth client, advertises a fixed 200x200 framebuffer, and returns
+//! generated gradient pixels for framebuffer update requests.
+//!
+//! It is useful as a network/display protocol exercise and a visual heartbeat,
+//! but it is not wired into `main.rs` by default. Production power/boot control
+//! uses the UART, Redfish, and USB MSC services instead.
+//!
+//! The server handles client pixel-format requests for 32-bit and 16-bit output
+//! so common VNC viewers can connect without custom settings.
+
 use embassy_net::{Stack, tcp::TcpSocket};
 use embedded_io_async::{Read, Write};
 use defmt::{info, warn};
@@ -23,11 +36,14 @@ pub async fn vnc_task(stack: Stack<'static>) {
     }
 }
 
+/// Handle one VNC/RFB client session.
 pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
+    // RFB version negotiation.
     let _ = socket.write_all(b"RFB 003.008\n").await;
     let mut client_version = [0u8; 12];
     let _ = socket.read_exact(&mut client_version).await;
 
+    // Security negotiation: advertise and accept "None" authentication.
     let _ = socket.write_all(&[1, 1]).await;
     let mut sec_type =[0u8; 1];
     let _ = socket.read_exact(&mut sec_type).await;
@@ -37,6 +53,7 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
     let mut client_init = [0u8; 1];
     let _ = socket.read_exact(&mut client_init).await;
 
+    // ServerInit message with a fixed framebuffer and the server name.
     let mut server_init =[0u8; 32];
     server_init[0..2].copy_from_slice(&SCREEN_WIDTH.to_be_bytes());
     server_init[2..4].copy_from_slice(&SCREEN_HEIGHT.to_be_bytes());
@@ -69,19 +86,24 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
         }
 
         match msg_type[0] {
-            // 设置像素格式
+            // Set pixel format.
             0 => {
+                // SetPixelFormat has 3 bytes of padding followed by the 16-byte
+                // PixelFormat structure. Only bits-per-pixel matters for the
+                // synthetic raw framebuffer below.
                 let mut payload = [0u8; 19];
                 match socket.read_exact(&mut payload).await {
                     Ok(_) => {
-                        current_bpp = payload[4]; // 更新为客户端想要的 bit-per-pixel
+                        current_bpp = payload[4]; // Track the bit depth requested by the client.
                         info!("[VNC] SetPixelFormat, client requested: {} bpp", current_bpp);
                     }
                     Err(_) => return,
                 }
             },
-            // 设置编码格式
+            // Set encoding format.
             2 => {
+                // The current framebuffer is raw-only; read and discard the
+                // client's encoding list so the stream remains aligned.
                 let mut header = [0u8; 3];
                 match socket.read_exact(&mut header).await {
                     Ok(_) => {
@@ -94,8 +116,10 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                     Err(_) => return,
                 }
             },
-            // 客户端请求刷新画面
+            // Client framebuffer update request.
             3 => {
+                // FramebufferUpdateRequest asks for a rectangle. Clamp it to the
+                // fixed framebuffer so malformed clients cannot overflow `line`.
                 let mut payload = [0u8; 9];
                 if socket.read_exact(&mut payload).await.is_err() {
                     warn!("⚠️ Failed to read FB Request payload");
@@ -114,7 +138,7 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                 let height = req_h.min(SCREEN_HEIGHT - start_y);
 
                 if width == 0 || height == 0 {
-                    continue; // 无效请求不予理会
+                    continue; // Ignore invalid rectangles.
                 }
 
                 let mut header = [0u8; 16]; 
@@ -130,6 +154,8 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                 let _ = socket.write_all(&header).await;
                 
                 let bytes_per_pixel = ((current_bpp / 8) as usize).max(1);
+                // Worst case is 200 pixels * 4 bytes, matching the 800-byte
+                // line buffer. Requests are clamped to screen bounds above.
                 let mut line = [0u8; 800]; 
                 
                 for y in start_y..(start_y + height) {
@@ -137,12 +163,12 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                         let [r, g, b] = generate_gradient_pixel(start_x + x, start_y + y);
                         let i = (x as usize) * bytes_per_pixel;
                         
-                        if bytes_per_pixel == 4 { // 32位 BGRA
+                        if bytes_per_pixel == 4 { // 32-bit BGRA.
                             line[i + 0] = b;
                             line[i + 1] = g;
                             line[i + 2] = r;
                             line[i + 3] = 0;
-                        } else if bytes_per_pixel == 2 { // 16位 RGB565 回落处理
+                        } else if bytes_per_pixel == 2 { // 16-bit RGB565 fallback.
                             let rgb565 = ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
                             let bytes = rgb565.to_le_bytes();
                             line[i + 0] = bytes[0];
@@ -154,8 +180,10 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                     let _ = socket.write_all(&line[..(width as usize * bytes_per_pixel)]).await;
                 }
             },
-            // 键盘事件
+            // Keyboard event.
             4 => {
+                // Keyboard events are logged only; this diagnostic VNC server is
+                // not connected to the Raspberry Pi input path.
                 let mut payload = [0u8; 7];
                 match socket.read_exact(&mut payload).await {
                     Ok(_) => {
@@ -169,8 +197,10 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                     }
                 }
             },
-            // 鼠标事件
+            // Pointer event.
             5 => {
+                // Pointer events are also diagnostic-only. Decoding button bits
+                // makes viewer behavior visible in defmt logs.
                 let mut payload =[0u8; 5];
                 match socket.read_exact(&mut payload).await {
                     Ok(_) => {
@@ -195,8 +225,10 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
                     }
                 }
             },
-            // 读取剪贴板
+            // Client clipboard text.
             6 => {
+                // ClientCutText payload is not used; drain it so later messages
+                // still start at the correct byte boundary.
                 let mut h = [0u8; 7];
                 let _ = socket.read_exact(&mut h).await;
                 let len = u32::from_be_bytes([h[3], h[4], h[5], h[6]]);
@@ -213,6 +245,7 @@ pub async fn handle_vnc_session(socket: &mut TcpSocket<'_>) {
     }
 }
 
+/// Produce a deterministic RGB gradient for the synthetic framebuffer.
 fn generate_gradient_pixel(x: u16, y: u16) -> [u8; 3] {
     let hue = ((x as u32 + y as u32) * 360 / (SCREEN_WIDTH as u32 + SCREEN_HEIGHT as u32)) as u16;
     let sat = 255;
@@ -231,4 +264,3 @@ fn generate_gradient_pixel(x: u16, y: u16) -> [u8; 3] {
         _ =>[c, 0, x_val as u8],
     }
 }
-

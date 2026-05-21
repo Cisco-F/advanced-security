@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+//! USB MSC example backed by the synthetic FAT16 filesystem.
+//!
+//! Exposes `ExampleBlockDevice` as a read-only USB disk, so USB enumeration and
+//! SCSI READ(10) can be tested without a TF card or host image server.
+
 use defmt::*;
 use embassy_executor::Spawner;
 use {defmt_rtt as _, panic_probe as _};
@@ -15,7 +20,6 @@ use hasm_openbmc::{
 async fn main(spawner: Spawner) {
     let p = sys_init();
 
-    // usb_msc模拟设备初始化
     let mut msc_dev = MSCDev::init();
     msc_dev.new(p.USB_OTG_FS, p.PA12, p.PA11);
     let usb = match msc_dev.usb_device.take() {

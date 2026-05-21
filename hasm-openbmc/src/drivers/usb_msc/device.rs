@@ -1,3 +1,20 @@
+//! USB Mass Storage Class device construction.
+//!
+//! This module owns the USB descriptors, control-request handler, and bulk IN/OUT
+//! endpoints used by the SCSI transport layer. The exported device follows the
+//! Bulk-Only Transport profile:
+//! - interface class 0x08: Mass Storage;
+//! - subclass 0x06: SCSI transparent command set;
+//! - protocol 0x50: bulk-only transport.
+//!
+//! The firmware exposes exactly one logical unit. The host sends Command Block
+//! Wrappers (CBW) on bulk OUT, receives command data on bulk IN, and finally
+//! receives a Command Status Wrapper (CSW) on bulk IN.
+//!
+//! All descriptor/control buffers are static. Embassy's USB builder borrows them
+//! for the full lifetime of the device, so stack allocation would be invalid.
+//! The endpoint packet size is 64 bytes because this is USB full speed.
+
 use defmt::{info, warn};
 use embassy_stm32::peripherals::{PA11, PA12, USB_OTG_FS};
 use embassy_stm32::usb::{Config, Driver};
@@ -18,16 +35,22 @@ bind_interrupts!(struct UsbIrqs {
 });
 
 pub struct SendToHostError {
+    /// Bytes that were still unsent when the endpoint failed.
     pub residue: u32,             // Number of bytes not sent
+    /// USB endpoint error returned by Embassy.
     pub usb_error: EndpointError, // The underlying USB error
 }
 
+/// Handles class-specific control requests for the MSC interface.
 struct MscHandler {
+    /// Interface number assigned by the USB builder.
     iface_num: u8,
 }
 
 impl Handler for MscHandler {
     fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        // GET_MAX_LUN returns the highest supported logical-unit index. A value
+        // of zero means "one LUN, numbered 0".
         if req.request_type == RequestType::Class
             && req.recipient == Recipient::Interface
             && req.request == 0xFE  // GET_MAX_LUN
@@ -42,6 +65,9 @@ impl Handler for MscHandler {
     }
 
     fn control_out(&mut self, req: Request, _data: &[u8]) -> Option<OutResponse> {
+        // Bulk-Only Reset asks the device to clear transport state. The command
+        // loop is stateless between CBWs, so acknowledging the request is enough
+        // for the current implementation.
         if req.request_type == RequestType::Class
             && req.recipient == Recipient::Interface
             && req.request == 0xFF  // Bulk-Only Mass Storage Reset
@@ -55,6 +81,12 @@ impl Handler for MscHandler {
     }
 }
 
+/// Owns the USB MSC endpoints and the built USB device.
+///
+/// The `usb_device` field is taken by `usb_device_task`, while `ep_in` and
+/// `ep_out` remain with the SCSI command loop. Splitting the ownership this way
+/// matches Embassy's model: the device runner handles bus/control traffic, and
+/// endpoint futures handle bulk payloads.
 pub struct MSCDev<D: embassy_usb::driver::Driver<'static>> {
     pub ep_in: Option<D::EndpointIn>,
     pub ep_out: Option<D::EndpointOut>,
@@ -62,6 +94,7 @@ pub struct MSCDev<D: embassy_usb::driver::Driver<'static>> {
 }
 
 impl MSCDev<Driver<'static, USB_OTG_FS>> {
+    /// Create an empty MSC wrapper before USB peripherals are available.
     pub fn init() -> Self {
         Self {
             ep_in: None,
@@ -70,12 +103,16 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         }
     }
 
+    /// Build descriptors, allocate endpoints, and construct the USB device.
     pub fn new(
         &mut self,
         usb_otg_fs: Peri<'static, USB_OTG_FS>,
         dp: Peri<'static, PA12>,
         dm: Peri<'static, PA11>,
     ) {
+        // VBUS detection is disabled because this board is commonly powered and
+        // debugged from a lab setup where the USB cable may not provide reliable
+        // VBUS sensing to the MCU pin.
         let ep_out_buffer = EP_OUT_BUFFER.init([0; 256]);
         let mut usb_cfg = Config::default();
         usb_cfg.vbus_detection = false;
@@ -85,6 +122,8 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         let bos_desc = BOS_DESC.init([0; 256]);
         let ctrl_buf = CTRL_BUF.init([0; 64]);
 
+        // Demo VID/PID values. For a production device these must be replaced
+        // with assigned identifiers.
         let mut cfg = embassy_usb::Config::new(0xc0de, 0xcafe);
         cfg.manufacturer = Some("MyBMC");
         cfg.product = Some("STM32F407 USB MSC");
@@ -95,6 +134,9 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         let mut builder = Builder::new(driver, cfg, config_desc, bos_desc, &mut [], ctrl_buf);
 
         // MSC interface descriptors: Class=0x08, Subclass=0x06, Protocol=0x50
+        // Endpoint direction is from the USB host's perspective:
+        // OUT carries CBW and write payloads from host to device;
+        // IN carries read payloads and CSW status back to host.
         let mut function = builder.function(0x08, 0x06, 0x50);
         let mut interface = function.interface();
         let mut alt_setting = interface.alt_setting(0x08, 0x06, 0x50, None);
@@ -115,6 +157,10 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
 }
 
 #[allow(async_fn_in_trait)]
+/// Minimal byte-stream interface needed by the SCSI command handlers.
+///
+/// Keeping this as a trait lets command parsing be tested or reused with other
+/// sinks, while the production implementation writes to USB bulk endpoints.
 pub trait ScsiDataSink {
     async fn read(&mut self, buf: &mut [u8]) -> Result<(), EndpointError>;
     async fn write(&mut self, buf: &[u8]) -> Result<(), SendToHostError>;
@@ -135,6 +181,8 @@ impl ScsiDataSink for MSCDev<Driver<'static, USB_OTG_FS>> {
         };
 
         if n < 31 {
+            // A valid CBW is exactly 31 bytes. Short reads indicate a transport
+            // error or host reset, so the command loop should drop this packet.
             warn!("Received short CBW: {} bytes", n);
             return Err(EndpointError::Disabled);
         }
@@ -156,6 +204,9 @@ impl ScsiDataSink for MSCDev<Driver<'static, USB_OTG_FS>> {
         let mut offset = 0usize;
 
         while offset < buf.len() {
+            // Full-speed bulk endpoints max out at 64 bytes per transaction.
+            // Larger SCSI payloads are fragmented here so command handlers can
+            // pass whole sector buffers without knowing USB packet limits.
             let chunk_size = core::cmp::min(64, buf.len() - offset);
             let chunk_data = &buf[offset..offset + chunk_size];
 

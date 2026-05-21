@@ -1,4 +1,30 @@
 #!/usr/bin/env python3
+#
+# Host-side disk-image range server for HASM-OpenBMC.
+#
+# The STM32 firmware exposes a USB mass-storage device to the Raspberry Pi, but
+# it does not keep the whole disk image in MCU flash or RAM. Instead, the
+# firmware translates SCSI sector reads into HTTP Range requests against this
+# server. This script is therefore the backing store for remote USB boot.
+#
+# Design notes:
+# - `/image` accepts normal GET requests and single `Range: bytes=start-end`
+#   requests.
+# - Ranges are inclusive, matching HTTP semantics and the firmware's sector math.
+# - Optional preload mode keeps the image in process memory for faster repeated
+#   boot tests.
+# - The server is intended for an isolated lab network, not the public Internet.
+#
+# Operational expectations:
+# - Run this script on the host PC before powering the Raspberry Pi.
+# - Keep the host IP in sync with `hasm-openbmc/src/consts.rs`.
+# - Use a raw disk image whose partition table and boot files are ready for the
+#   Pi boot mode being tested.
+# - Do not expose the server outside the bench network; there is no auth layer.
+#
+# Error handling favors firmware visibility over HTTP sophistication. Bad ranges
+# return simple status codes, while valid ranges stream exactly the requested
+# bytes so the STM32 can fill SCSI READ(10) responses without guessing.
 """Simple HTTP server to serve img/raspi_recover.img for STM32 testing.
 
 Features:
@@ -18,6 +44,7 @@ from aiohttp import web
 
 
 def parse_args():
+    # Defaults match the firmware constants and README quick-start instructions.
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="192.168.1.77")
     p.add_argument("--port", type=int, default=8000)
@@ -27,11 +54,14 @@ def parse_args():
 
 
 async def handle_ping(request):
+    # Lightweight endpoint for checking that the host server is reachable.
     return web.Response(text="OK")
 
 
 def http_range_to_slice(range_header, file_size):
     # supports single range "bytes=start-end"
+    # The firmware sends inclusive HTTP ranges derived from LBA * 512. This
+    # helper also accepts suffix ranges for manual testing with curl.
     if not range_header or not range_header.startswith("bytes="):
         return None
     spec = range_header[len("bytes="):]
@@ -58,6 +88,7 @@ def http_range_to_slice(range_header, file_size):
 
 
 async def handle_image(request):
+    # Main firmware data path: SCSI sector reads arrive here as HTTP byte ranges.
     app = request.app
     img_path = app['img_path']
     size = app['img_size']
@@ -70,6 +101,10 @@ async def handle_image(request):
     r = http_range_to_slice(range_hdr, size)
     if r is None:
         # full response
+        # A full response is useful for manual download tests. Firmware reads
+        # normally include a Range header and take the 206 branch below.
+        # Returning Accept-Ranges in both branches lets simple tools detect that
+        # the same endpoint can serve partial requests.
         headers = {
             'Content-Type': 'application/octet-stream',
             'Content-Length': str(size),
@@ -82,6 +117,8 @@ async def handle_image(request):
     else:
         start, end = r
         length = end - start + 1
+        # Content-Range is required for a proper 206 response and is also useful
+        # when debugging firmware logs against server logs.
         headers = {
             'Content-Type': 'application/octet-stream',
             'Content-Length': str(length),
@@ -89,9 +126,13 @@ async def handle_image(request):
             'Accept-Ranges': 'bytes',
         }
         if data is not None:
+            # Preload mode serves directly from memory, reducing host disk jitter
+            # during repeated boot tests.
             return web.Response(status=206, body=data[start:end+1], headers=headers)
         else:
             # stream from file
+            # File mode keeps memory use bounded for larger images and streams in
+            # chunks so the aiohttp loop can keep making progress.
             resp = web.StreamResponse(status=206, headers=headers)
             await resp.prepare(request)
             with open(img_path, 'rb') as f:
@@ -110,6 +151,9 @@ async def handle_image(request):
 
 
 async def handle_block(request):
+    # Optional debugging endpoint for fetching block-aligned slices by LBA. The
+    # current firmware uses `/image`, but `/block/{lba}` is handy when comparing
+    # sector contents from a browser or curl.
     app = request.app
     img_path = app['img_path']
     size = app['img_size']
@@ -126,6 +170,8 @@ async def handle_block(request):
     count = int(request.query.get('count', '1'))
     if count < 1:
         return web.Response(status=400, text='bad count')
+    # Convert logical blocks to byte offsets using the same 512-byte sector size
+    # advertised by the firmware's USB MSC layer.
     offset = lba * 512
     length = count * 512
     if offset < 0 or offset + length > size:
@@ -145,19 +191,27 @@ async def handle_block(request):
 
 
 async def init_app(img_path, preload=False):
+    # Store image metadata in the aiohttp app so each request handler avoids
+    # repeating stat calls and path validation.
     app = web.Application()
     if not os.path.exists(img_path):
+        # Fail early so the STM32 does not see connection resets for a missing
+        # backing image.
         raise SystemExit(f'image not found: {img_path}')
     size = os.path.getsize(img_path)
     app['img_path'] = img_path
     app['img_size'] = size
     if preload:
+        # Loading once is useful when the image is small enough and repeated boot
+        # attempts should not be affected by host filesystem cache behavior.
         print('Preloading image into memory...')
         with open(img_path, 'rb') as f:
             app['img_mem'] = f.read()
         print('Preload done, size', len(app['img_mem']))
 
     app.router.add_get('/ping', handle_ping)
+    # `/image` is the production firmware path; `/block` is a human-friendly
+    # diagnostic path.
     app.router.add_get('/image', handle_image)
     app.router.add_get('/block/{lba}', handle_block)
 
@@ -166,6 +220,8 @@ async def init_app(img_path, preload=False):
 
 def main():
     args = parse_args()
+    # aiohttp owns the event loop after `web.run_app`; initialization is kept in
+    # an async helper so future startup checks can share the same loop style.
     app = asyncio.run(init_app(args.img, preload=args.preload))
     print(f'Serving {args.img} on http://{args.host}:{args.port} (preload={args.preload})')
     web.run_app(app, host=args.host, port=args.port)

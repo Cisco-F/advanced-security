@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+//! Standalone VNC/RFB diagnostics example.
+//!
+//! Self-contained no-auth RFB 3.8 server that renders a synthetic framebuffer on
+//! TCP port 5900. Useful as a visual Ethernet/protocol smoke test.
+
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
@@ -94,7 +99,6 @@ async fn main(spawner: Spawner) {
     }
     info!("Network link is UP! IP Address ready.");
 
-    // [修复] 加大缓冲区，一帧画面很大，1024 容易塞满阻塞降低帧率甚至超时
     let mut rx_buffer = [0; 4096]; 
     let mut tx_buffer =[0; 4096];
 
@@ -144,6 +148,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
     let mut client_version = [0u8; 12];
     socket.read_exact(&mut client_version).await.map_err(|_| ())?;
 
+    // No authentication; this example is only for isolated lab diagnostics.
     socket.write_all(&[1, 1]).await.map_err(|_| ())?;
     let mut sec_type =[0u8; 1];
     socket.read_exact(&mut sec_type).await.map_err(|_| ())?;
@@ -175,7 +180,6 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
     socket.write_all(&server_init).await.map_err(|_| ())?;
     info!("✓ Server Init Sent. Entering Event Loop!");
 
-    // [修复] 保存客户端实际请求的像素位数，避免客户端按其它格式解析而崩溃
     let mut current_bpp = 32u8;
 
     loop {
@@ -186,19 +190,20 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
         }
 
         match msg_type[0] {
-            // 设置像素格式
+            // Set pixel format.
             0 => {
                 let mut payload = [0u8; 19];
                 match socket.read_exact(&mut payload).await {
                     Ok(_) => {
-                        current_bpp = payload[4]; // 更新为客户端想要的 bit-per-pixel
+                        current_bpp = payload[4]; // Track the client's requested bit depth.
                         info!("[VNC] SetPixelFormat, client requested: {} bpp", current_bpp);
                     }
                     Err(_) => return Err(()),
                 }
             },
-            // 设置编码格式
+            // Set encoding format.
             2 => {
+                // Raw encoding is the only format emitted; drain the offered list.
                 let mut header = [0u8; 3];
                 match socket.read_exact(&mut header).await {
                     Ok(_) => {
@@ -211,7 +216,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                     Err(_) => return Err(()),
                 }
             },
-            // 客户端请求刷新画面
+            // Client framebuffer update request.
             3 => {
                 let mut payload = [0u8; 9];
                 if socket.read_exact(&mut payload).await.is_err() {
@@ -225,14 +230,13 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                 let req_w = u16::from_be_bytes([payload[5], payload[6]]);
                 let req_h = u16::from_be_bytes([payload[7], payload[8]]);
                 
-                // 限制在你的 SCREEN 范围内
                 let start_x = req_x.min(SCREEN_WIDTH);
                 let start_y = req_y.min(SCREEN_HEIGHT);
                 let width = req_w.min(SCREEN_WIDTH - start_x);
                 let height = req_h.min(SCREEN_HEIGHT - start_y);
 
                 if width == 0 || height == 0 {
-                    continue; // 无效请求不予理会
+                    continue; // Ignore invalid rectangles.
                 }
 
                 let mut header = [0u8; 16]; 
@@ -248,7 +252,6 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                 socket.write_all(&header).await.map_err(|_| ())?;
                 
                 let bytes_per_pixel = ((current_bpp / 8) as usize).max(1);
-                // 声明单行缓冲区，200 宽 * 4 bytes = 800 bytes，完全不会撑爆 STM32 的栈
                 let mut line = [0u8; 800]; 
                 
                 for y in start_y..(start_y + height) {
@@ -256,25 +259,24 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                         let [r, g, b] = generate_gradient_pixel(start_x + x, start_y + y);
                         let i = (x as usize) * bytes_per_pixel;
                         
-                        // 动态适应客户端要求的像素尺寸
-                        if bytes_per_pixel == 4 { // 32位 BGRA
+                        if bytes_per_pixel == 4 { // 32-bit BGRA.
                             line[i + 0] = b;
                             line[i + 1] = g;
                             line[i + 2] = r;
                             line[i + 3] = 0;
-                        } else if bytes_per_pixel == 2 { // 16位 RGB565 回落处理
+                        } else if bytes_per_pixel == 2 { // 16-bit RGB565 fallback.
                             let rgb565 = ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
                             let bytes = rgb565.to_le_bytes();
                             line[i + 0] = bytes[0];
                             line[i + 1] = bytes[1];
                         } else { 
-                            line[i] = g; // 随便给个灰色防崩溃
+                            line[i] = g; // Grayscale fallback for unusual formats.
                         }
                     }
                     socket.write_all(&line[..(width as usize * bytes_per_pixel)]).await.map_err(|_| ())?;
                 }
             },
-            // 键盘事件
+            // Keyboard event.
             4 => {
                 let mut payload = [0u8; 7];
                 match socket.read_exact(&mut payload).await {
@@ -289,7 +291,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                     }
                 }
             },
-            // 鼠标事件
+            // Pointer event.
             5 => {
                 let mut payload =[0u8; 5];
                 match socket.read_exact(&mut payload).await {
@@ -315,7 +317,7 @@ async fn handle_vnc_session(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
                     }
                 }
             },
-            // 读取剪贴板
+            // Client clipboard text.
             6 => {
                 let mut h = [0u8; 7];
                 socket.read_exact(&mut h).await.map_err(|_|())?;

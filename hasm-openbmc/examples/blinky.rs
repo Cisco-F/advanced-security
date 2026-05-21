@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+//! Minimal GPIO heartbeat example.
+//!
+//! Verifies the probe, RTT logging, Embassy executor, and PF6 LED wiring before
+//! bringing up network, USB, or storage peripherals.
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};

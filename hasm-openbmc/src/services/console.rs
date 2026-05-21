@@ -1,3 +1,16 @@
+//! TCP-to-UART console bridge.
+//!
+//! The host connects to `TELNET_PORT` and receives the Raspberry Pi serial boot
+//! log through USART1. Bytes typed by the host are forwarded back to the Pi so the
+//! same session can be used as an interactive recovery console.
+//!
+//! Telnet is used only as a convenient TCP terminal protocol. The firmware does
+//! not implement full option negotiation; it requests character mode and then
+//! treats the stream mostly as raw bytes.
+//!
+//! The bridge runs a bidirectional `select`: whichever direction exits first
+//! ends the session and lets the outer loop accept a new client.
+
 use defmt::*;
 use embassy_futures::select::{select, Either};
 use embassy_net::{Stack, tcp::TcpSocket};
@@ -6,7 +19,6 @@ use embedded_io_async::{Read, Write};
 use crate::consts::TELNET_PORT;
 
 use {defmt_rtt as _, panic_probe as _};
-
 
 #[embassy_executor::task]
 pub async fn console_task(mut uart: BufferedUart<'static>, stack: Stack<'static>) {
@@ -49,6 +61,7 @@ pub async fn console_task(mut uart: BufferedUart<'static>, stack: Stack<'static>
     }
 }
 
+/// Bridge one accepted TCP session to the buffered UART.
 async fn bridge_session(uart: &mut BufferedUart<'_>, socket: &mut TcpSocket<'_>) -> Result<(), ()> {
     let (mut reader, mut writer) = socket.split();
     let (mut tx, mut rx) = uart.split_ref();
@@ -56,6 +69,8 @@ async fn bridge_session(uart: &mut BufferedUart<'_>, socket: &mut TcpSocket<'_>)
     let uart_to_tcp = async {
         let mut buf = [0u8; 128];
         loop {
+            // Forward Pi output as soon as bytes are available so boot logs feel
+            // live to the remote operator.
             let n = match rx.read(&mut buf).await {
                 Ok(n) => n,
                 Err(_) => return Err(()),
@@ -73,6 +88,8 @@ async fn bridge_session(uart: &mut BufferedUart<'_>, socket: &mut TcpSocket<'_>)
         let mut inbuf = [0u8; 256];
         let mut out = [0u8; 512];
         loop {
+            // Terminal programs differ on Enter and Backspace encoding. Normalize
+            // here so the Pi sees the conventional serial-console bytes.
             let n = match reader.read(&mut inbuf).await {
                 Ok(n) => n,
                 Err(_) => return Err(()),

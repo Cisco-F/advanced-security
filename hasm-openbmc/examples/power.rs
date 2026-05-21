@@ -1,7 +1,11 @@
 #![no_std]
 #![no_main]
 
-use defmt::*;
+//! Power-control service example.
+//!
+//! Runs Ethernet, the HTTP power API, PB3/PB4 power pulses, and the PF6 state
+//! LED without UART or USB MSC.
+
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Speed};
 use hasm_openbmc::{drivers::{ethernet::ethernet_device, led::{led_init, led_task}}, hal::init::sys_init, net::{init_eth_stack, net_task}, services::{power_control::{PowerControl, power_task}, web_server::http_task}};

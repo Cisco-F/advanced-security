@@ -1,5 +1,14 @@
+//! Small formatting and response helpers.
+//!
+//! These helpers avoid `alloc` and `format!`, which are unavailable in this
+//! firmware. Callers pass stack buffers and receive slices into those buffers.
+//!
+//! The Redfish system documents are static strings because the management API is
+//! deliberately tiny: only the `PowerState` field varies at runtime.
+
 use embassy_net::Ipv4Address;
 
+/// Format a `u16` as decimal ASCII into `buf`.
 pub fn itoa(mut n: u16, buf: &mut [u8]) -> &[u8] {
     if n == 0 { return b"0"; }
     let mut i = 0;
@@ -13,6 +22,9 @@ pub fn itoa(mut n: u16, buf: &mut [u8]) -> &[u8] {
     slice
 }
 
+/// Format a `u32` as decimal ASCII into `buf`.
+///
+/// Used for HTTP Range offsets that can exceed the 16-bit status/length helper.
 pub fn u32_to_ascii(mut n: u32, buf: &mut [u8]) -> &[u8] {
     if n == 0 { return b"0"; }
     let mut i = 0;
@@ -25,6 +37,7 @@ pub fn u32_to_ascii(mut n: u32, buf: &mut [u8]) -> &[u8] {
     &buf[..i]
 }
 
+/// Format an IPv4 address as dotted decimal into `out`.
 pub fn format_ip(ip: Ipv4Address, out: &mut [u8]) -> &[u8] {
     // write dotted quad into out, return slice
     let octets = ip.octets();
@@ -54,6 +67,7 @@ pub fn format_ip(ip: Ipv4Address, out: &mut [u8]) -> &[u8] {
     &out[..idx]
 }
 
+/// Return the Redfish ComputerSystem JSON matching the current power state.
 pub fn dump_system_info(_system_id: &str, power_on: bool) -> &'static str {
     if power_on {
         SYSTEM_INFO_ON
@@ -62,6 +76,7 @@ pub fn dump_system_info(_system_id: &str, power_on: bool) -> &'static str {
     }
 }
 
+// Pre-rendered Redfish ComputerSystem resource for an on target.
 static SYSTEM_INFO_ON: &str = r##"{
         "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
         "@odata.id": "/redfish/v1/Systems/1",
@@ -80,6 +95,7 @@ static SYSTEM_INFO_ON: &str = r##"{
     }"##
 ;
 
+// Pre-rendered Redfish ComputerSystem resource for an off target.
 static SYSTEM_INFO_OFF: &str = r##"{
         "@odata.type": "#ComputerSystem.v1_15_0.ComputerSystem",
         "@odata.id": "/redfish/v1/Systems/1",

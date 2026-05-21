@@ -1,9 +1,21 @@
+//! Minimal HTTP/Redfish-like management service.
+//!
+//! The service exposes just enough Redfish shape for host tools or scripts to
+//! inspect and toggle the controlled Raspberry Pi power state:
+//! - `/ping` for a simple connectivity check;
+//! - `/redfish/v1` and `/redfish/v1/Systems` for service discovery;
+//! - `/redfish/v1/Systems/1` for current power state;
+//! - `ComputerSystem.Reset` POST for power on and force-off requests.
+//!
+//! Request parsing is intentionally tiny. The board is used on an isolated lab
+//! network, and the Python console tool sends fixed requests. Avoiding a general
+//! HTTP parser keeps RAM usage predictable in `no_std`.
+
 use defmt::*;
 use embassy_net::{Stack, tcp::TcpSocket};
 use {defmt_rtt as _, panic_probe as _};
 
 use crate::{services::power_control::{is_power_on, set_power_state}, utils::*};
-
 
 #[embassy_executor::task]
 pub async fn http_task(stack: Stack<'static>) {
@@ -22,11 +34,14 @@ pub async fn http_task(stack: Stack<'static>) {
     }
 }
 
+/// Read one HTTP request, dispatch the supported management endpoint, and close
+/// the connection.
 pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
     let mut buf = [0u8; 1024];
     let mut filled = 0usize;
 
-    // 读取 Header
+    // Read headers. Stop at CRLF CRLF because no supported endpoint needs to
+    // stream a large request body.
     'read: loop {
         match socket.read(&mut buf[filled..]).await {
             Ok(0) | Err(_) => break 'read,
@@ -43,6 +58,8 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
     let req_str = core::str::from_utf8(&buf[..filled]).unwrap_or("");
     let mut method = "";
     let mut path = "";
+    // Only the request line is needed for routing. Headers are ignored except
+    // that the reset handler later searches the small body for `ResetType`.
     if let Some(line) = req_str.lines().next() {
         let mut parts = line.split_whitespace();
         method = parts.next().unwrap_or("");
@@ -64,10 +81,15 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
         }
         // Redfish Systems, return power state
         ("GET", "/redfish/v1/Systems/1") => {
+            // Generate this response dynamically so the PowerState field follows
+            // the atomic flag updated by the power-control task.
             send_response(socket, 200, b"OK", dump_system_info("1", is_power_on()).as_bytes()).await;
         }
         // power control
         ("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset") => {
+            // The console helper sends compact JSON with no extra whitespace.
+            // This substring check is enough for the controlled tooling and
+            // avoids pulling in a JSON parser for firmware-side management.
             if req_str.contains("\"ResetType\":\"On\"") {
                 set_power_state(true);
                 send_response(socket, 200, b"OK", b"Power On!").await;
@@ -80,6 +102,9 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
         }
 
         _ => {
+            // Unknown routes return an empty 404. Keeping the body empty makes it
+            // cheap for scripts to treat any non-supported endpoint as a simple
+            // miss without parsing an error document.
             send_response(socket, 404, b"Not Found", b"").await;
         }
     }
@@ -90,6 +115,7 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
     socket.close();
 }
 
+/// Write a small HTTP/1.1 response without heap allocation.
 async fn send_response(
     socket: &mut embassy_net::tcp::TcpSocket<'_>,
     status: u16,
@@ -99,6 +125,7 @@ async fn send_response(
     use embedded_io_async::Write;
     let mut num_buf = [0u8; 8];
     
+    // Compose the response from fixed byte slices and stack-formatted numbers.
     let _ = socket.write_all(b"HTTP/1.1 ").await;
     let _ = socket.write_all(itoa(status, &mut num_buf)).await;
     let _ = socket.write_all(b" ").await;
@@ -111,6 +138,8 @@ async fn send_response(
     }
 }
 
+// Static Redfish discovery resources. System state itself is generated in
+// `utils::dump_system_info` so the power flag can be reflected at request time.
 static ROOT_RESOURCE: &str = r##"{
     "@odata.type": "#ServiceRoot.v1_15_0.ServiceRoot",
     "@odata.id": "/redfish/v1",

@@ -1,11 +1,15 @@
 #![no_std]
 #![no_main]
 
+//! Ethernet link-status smoke test.
+//!
+//! Brings up the production RMII pin mapping and logs link state once per
+//! second, which is enough to validate PHY wiring before testing TCP services.
+
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{eth::{Ethernet, GenericPhy}, peripherals::ETH};
 use embassy_time::{Timer, Duration};
-use hasm_openbmc::{drivers::ethernet::ethernet_device, hal::init::sys_init, net::init_eth_stack};
+use hasm_openbmc::{drivers::ethernet::ethernet_device, hal::init::sys_init, net::{init_eth_stack, net_task}};
 use {defmt_rtt as _, panic_probe as _};
 
 

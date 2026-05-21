@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+//! UART-over-TCP console example.
+//!
+//! Starts Ethernet and the UART bridge only. The host connects to
+//! `tcp://BOARD_IP:2323` to validate Raspberry Pi serial wiring.
+
 use defmt::*;
 use embassy_executor::Spawner;
 use {defmt_rtt as _, panic_probe as _};
@@ -37,7 +42,6 @@ async fn main(spawner: Spawner) {
     stack.wait_config_up().await;
     unwrap!(spawner.spawn(net_task(runner)));
 
-    // 串口控制初始化
     let ip = get_board_ip();
     let uart = uart_init(p.USART1, p.PA10, p.PA9, UART_BAUDRATE);
     info!("UART ready: Raspberry Pi TXD -> STM32 PA10 (USART1_RX)");
