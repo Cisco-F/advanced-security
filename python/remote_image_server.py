@@ -33,7 +33,7 @@ Features:
 - Optional `--preload` to load the whole image into RAM for lower latency.
 
 Usage:
-    python tools/remote_image_server.py --host 192.168.1.77 --port 8000 --img img/raspi_recover.img --preload
+    python tools/remote_image_server.py --host 192.168.10.1 --port 8000 --img img/raspi_recover.img --preload
 
 Requires: Python 3.8+ and aiohttp: `pip install aiohttp`
 """
@@ -46,7 +46,7 @@ from aiohttp import web
 def parse_args():
     # Defaults match the firmware constants and README quick-start instructions.
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default="192.168.1.77")
+    p.add_argument("--host", default="192.168.10.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--img", default="img/raspi_recover.img")
     p.add_argument("--preload", action="store_true", help="Preload image into memory")

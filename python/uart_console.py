@@ -1,6 +1,6 @@
 """
 UART Console Client
-Connects to the STM32 UART bridge (192.168.1.177:2323), forwards keyboard input,
+Connects to the STM32 UART bridge (192.168.10.2:2323), forwards keyboard input,
 and displays serial output in real time.
 """
 
@@ -33,7 +33,7 @@ if sys.platform == "win32":
     import msvcrt
 
 # Managed board IP.
-HOST = "192.168.1.177"
+HOST = "192.168.10.2"
 # Managed board telnet port.
 PORT = 2323
 # Managed board HTTP service port for power control and status.

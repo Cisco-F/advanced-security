@@ -55,7 +55,7 @@ async fn main(spawner: Spawner) {
     msc_dev.new(p.USB_OTG_FS, p.PA12, p.PA11);
     unwrap!(spawner.spawn(usb_task(msc_dev.usb_device.take().unwrap())));
 
-    let ip = Ipv4Addr::new(192, 168, 1, 77);
+    let ip = Ipv4Addr::new(192, 168, 10, 1);
     let port = 8000;
     let bdev = RemoteBlockDevice::new(stack, ip, port);
     let mut cached_bdev = CachedData::new(bdev);

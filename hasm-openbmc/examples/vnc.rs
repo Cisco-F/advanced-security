@@ -76,9 +76,9 @@ async fn main(spawner: Spawner) {
         mac,
     );
 
-    let address = Ipv4Address::new(192, 168, 1, 177); 
+    let address = Ipv4Address::new(192, 168, 10, 2);
     let cidr = Ipv4Cidr::new(address, 24);
-    let gateway = Ipv4Address::new(192, 168, 1, 77);  
+    let gateway = Ipv4Address::new(192, 168, 10, 1);
     let dns_servers: Vec<Ipv4Address, 3> = Vec::new();
 
     let static_config = StaticConfigV4 {
@@ -104,7 +104,7 @@ async fn main(spawner: Spawner) {
 
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        info!("VNC Server waiting for connection on 192.168.1.177:5900 ...");
+        info!("VNC Server waiting for connection on 192.168.10.2:5900 ...");
         
         if let Err(e) = socket.accept(5900).await {
             error!("Accept error => {:?}", e);

@@ -14,6 +14,7 @@
 //! All descriptor/control buffers are static. Embassy's USB builder borrows them
 //! for the full lifetime of the device, so stack allocation would be invalid.
 //! The endpoint packet size is 64 bytes because this is USB full speed.
+//! STM32F407ZG also supports USB high speed, but additional hardware (USB3300, etc.) is needed.
 
 use defmt::{info, warn};
 use embassy_stm32::peripherals::{PA11, PA12, USB_OTG_FS};
@@ -36,9 +37,9 @@ bind_interrupts!(struct UsbIrqs {
 
 pub struct SendToHostError {
     /// Bytes that were still unsent when the endpoint failed.
-    pub residue: u32,             // Number of bytes not sent
+    pub residue: u32,
     /// USB endpoint error returned by Embassy.
-    pub usb_error: EndpointError, // The underlying USB error
+    pub usb_error: EndpointError,
 }
 
 /// Handles class-specific control requests for the MSC interface.
@@ -110,9 +111,6 @@ impl MSCDev<Driver<'static, USB_OTG_FS>> {
         dp: Peri<'static, PA12>,
         dm: Peri<'static, PA11>,
     ) {
-        // VBUS detection is disabled because this board is commonly powered and
-        // debugged from a lab setup where the USB cable may not provide reliable
-        // VBUS sensing to the MCU pin.
         let ep_out_buffer = EP_OUT_BUFFER.init([0; 256]);
         let mut usb_cfg = Config::default();
         usb_cfg.vbus_detection = false;
