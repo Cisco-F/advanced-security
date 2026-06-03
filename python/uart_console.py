@@ -1,6 +1,6 @@
 """
 UART Console Client
-Connects to the STM32 UART bridge (192.168.10.2:2323), forwards keyboard input,
+Connects to the STM32 UART bridge (169.254.77.2:2323), forwards keyboard input,
 and displays serial output in real time.
 """
 
@@ -29,25 +29,51 @@ import threading
 import sys
 import os
 import json
+import argparse
 if sys.platform == "win32":
     import msvcrt
 
 # Managed board IP.
-HOST = "192.168.10.2"
+HOST = "169.254.77.2"
 # Managed board telnet port.
 PORT = 2323
 # Managed board HTTP service port for power control and status.
 HTTP_PORT = 80
+# Host-side image server defaults. These must match the firmware constants.
+IMG_SERVER_HOST = "169.254.77.1"
+IMG_SERVER_PORT = 8000
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="HASM-OpenBMC host-side UART and recovery console")
+    parser.add_argument("--stm32-host", default=HOST, help="STM32 management/UART IP address")
+    parser.add_argument("--uart-port", type=int, default=PORT, help="STM32 UART bridge TCP port")
+    parser.add_argument("--http-port", type=int, default=HTTP_PORT, help="STM32 management HTTP port")
+    parser.add_argument("--img-host", default=IMG_SERVER_HOST, help="Remote image server IP address")
+    parser.add_argument("--img-port", type=int, default=IMG_SERVER_PORT, help="Remote image server HTTP port")
+    return parser.parse_args()
+
+
+def apply_config(args):
+    global HOST, PORT, HTTP_PORT, IMG_SERVER_HOST, IMG_SERVER_PORT
+    HOST = args.stm32_host
+    PORT = args.uart_port
+    HTTP_PORT = args.http_port
+    IMG_SERVER_HOST = args.img_host
+    IMG_SERVER_PORT = args.img_port
 
 MENU = f"""
 ╔══════════════════════════════╗
 ║      UART Console Client     ║
-║  1. Ping                     ║
+║  1. Health check             ║
 ║  2. Get power state          ║
 ║  3. Power on                 ║
 ║  4. Power off                ║
-║  5. Connect                  ║
-║  6. Exit                     ║
+║  5. Force reboot             ║
+║  6. Select boot image        ║
+║  7. Boot selected image      ║
+║  8. Connect UART console     ║
+║  9. Exit                     ║
 ╚══════════════════════════════╝
 """
 
@@ -87,6 +113,176 @@ def _body(resp: str) -> str:
     # The firmware always closes the connection after one response, so splitting
     # at the first blank line is enough for this small client.
     return resp.split("\r\n\r\n", 1)[1].strip() if "\r\n\r\n" in resp else resp.strip()
+
+
+def _format_size(size: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{size} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _image_server_request(method: str, path: str, payload=None):
+    body = "" if payload is None else json.dumps(payload, separators=(",", ":"))
+    body_bytes = body.encode("utf-8")
+    req = (
+        f"{method} {path} HTTP/1.1\r\n"
+        f"Host: {IMG_SERVER_HOST}\r\n"
+        "Connection: close\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body_bytes)}\r\n"
+        "\r\n"
+    ).encode("utf-8") + body_bytes
+
+    with socket.create_connection((IMG_SERVER_HOST, IMG_SERVER_PORT), timeout=5) as s:
+        s.settimeout(3)
+        s.sendall(req)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+
+        if b"\r\n\r\n" not in data:
+            return 0, data.decode("utf-8", errors="replace")
+
+        head, rest = data.split(b"\r\n\r\n", 1)
+        status_line = head.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+        try:
+            status = int(status_line.split()[1])
+        except (IndexError, ValueError):
+            status = 0
+
+        content_len = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    content_len = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    content_len = 0
+                break
+
+        body_bytes = rest
+        while len(body_bytes) < content_len:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            body_bytes += chunk
+        return status, body_bytes[:content_len].decode("utf-8", errors="replace")
+
+
+def _image_server_json(method: str, path: str, payload=None):
+    status, body = _image_server_request(method, path, payload)
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        data = {"raw": body}
+    return status, data
+
+
+def _check_stm32_health():
+    try:
+        resp = _http_request("GET", "/ping")
+    except OSError as e:
+        return False, str(e)
+    body = _body(resp)
+    if not body:
+        return False, "empty response"
+    return True, body
+
+
+def _check_image_server_health():
+    try:
+        status, body = _image_server_request("GET", "/ping")
+    except OSError as e:
+        return False, str(e)
+    if 200 <= status < 300:
+        return True, body
+    return False, f"HTTP {status} {body}"
+
+
+def _show_server_images(data):
+    images = data.get("images", [])
+    print(f"镜像服务器: http://{IMG_SERVER_HOST}:{IMG_SERVER_PORT}")
+    if not images:
+        print("服务器没有发现镜像。")
+        return
+    for image in images:
+        marker = "*" if image.get("active") else " "
+        print(
+            f"{image['index']:2d}. {marker} {image['name']} "
+            f"({_format_size(int(image['size']))})"
+        )
+    if data.get("current"):
+        print(f"\n当前启用: {data['current']}")
+
+
+def get_server_images():
+    ok, detail = _check_image_server_health()
+    if not ok:
+        print(f"[镜像服务器错误] {detail}")
+        print(f"拒绝继续：请先确认 image server 正常运行: http://{IMG_SERVER_HOST}:{IMG_SERVER_PORT}")
+        return None
+
+    try:
+        status, data = _image_server_json("GET", "/images")
+    except OSError as e:
+        print(f"[镜像服务器错误] {e}")
+        print(f"拒绝继续：请先确认 image server 正常运行: http://{IMG_SERVER_HOST}:{IMG_SERVER_PORT}")
+        return None
+    if status != 200:
+        print(data.get("error", data.get("raw", f"HTTP {status}")))
+        print("拒绝继续：image server 没有返回可用镜像列表。")
+        return None
+    if data.get("error"):
+        print(data["error"])
+        print("拒绝继续：image server 返回异常。")
+        return None
+    if not data.get("images"):
+        print("拒绝继续：image server 当前没有可用镜像。")
+        return None
+    return data
+
+
+def select_boot_image():
+    data = get_server_images()
+    if data is None:
+        _wait_key_and_back_to_menu()
+        return None
+
+    _show_server_images(data)
+    images = data.get("images", [])
+    if not images:
+        _wait_key_and_back_to_menu()
+        return None
+
+    choice = input("\n请选择要启用的镜像编号: ").strip()
+    try:
+        index = int(choice)
+    except ValueError:
+        print("无效输入。")
+        _wait_key_and_back_to_menu()
+        return None
+
+    try:
+        status, selected = _image_server_json("POST", "/images/select", {"index": index})
+    except OSError as e:
+        print(f"[镜像服务器错误] {e}")
+        _wait_key_and_back_to_menu()
+        return None
+
+    if status != 200:
+        print(selected.get("error", selected.get("raw", f"HTTP {status}")))
+        _wait_key_and_back_to_menu()
+        return None
+
+    print(f"已启用: {selected.get('current')}")
+    _wait_key_and_back_to_menu()
+    return selected
 
 
 def _http_request(method: str, path: str, body: str = "") -> str:
@@ -139,15 +335,17 @@ def _http_request(method: str, path: str, body: str = "") -> str:
         return full.decode("utf-8", errors="replace")
 
 
-def ping():
-    # Lightweight connectivity check before trying longer console sessions.
-    try:
-        resp = _http_request("GET", "/ping")
-    except OSError as e:
-        print(f"[错误] {e}")
-        _wait_key_and_back_to_menu()
-        return
-    print(_body(resp))
+def health_check():
+    # Check both control-plane dependencies used by this shell.
+    print("Health check")
+    print(f"- STM32 management API: http://{HOST}:{HTTP_PORT}/ping")
+    ok, detail = _check_stm32_health()
+    print(f"  {'OK' if ok else 'FAIL'}: {detail}")
+
+    print(f"- Image server: http://{IMG_SERVER_HOST}:{IMG_SERVER_PORT}/ping")
+    ok, detail = _check_image_server_health()
+    print(f"  {'OK' if ok else 'FAIL'}: {detail}")
+
     _wait_key_and_back_to_menu()
 
 
@@ -175,8 +373,37 @@ def set_power(reset_type: str, label: str):
     except OSError as e:
         print(f"[错误] {e}")
         _wait_key_and_back_to_menu()
-        return
+        return False
     print(_body(resp))
+    _wait_key_and_back_to_menu()
+    return True
+
+
+def _send_reset(reset_type: str):
+    payload = json.dumps({"ResetType": reset_type}, separators=(",", ":"))
+    try:
+        resp = _http_request("POST", "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", payload)
+    except OSError as e:
+        print(f"[错误] {e}")
+        return False
+    print(_body(resp))
+    return True
+
+
+def force_reboot():
+    print("强制重启会先通过 PB3 触发关断，再通过 PB4 触发上电。")
+    _send_reset("ForceRestart")
+    _wait_key_and_back_to_menu()
+
+
+def boot_selected_image():
+    data = get_server_images()
+    if data is None:
+        _wait_key_and_back_to_menu()
+        return
+    print(f"当前启动镜像: {data.get('current')}")
+    print("STM32 固件会继续以 USB MSC 设备暴露该远程镜像；正在触发强制重启...")
+    _send_reset("ForceRestart")
     _wait_key_and_back_to_menu()
 
 def strip_telnet_negotiation(data: bytes) -> bytes:
@@ -296,6 +523,12 @@ def connect():
     # Establish one interactive UART session. Leaving the session returns to the
     # management menu instead of exiting the whole tool.
     _clear_screen()
+    ok, detail = _check_stm32_health()
+    if not ok:
+        print(f"拒绝连接 UART console：STM32 management API health check 失败: {detail}")
+        print(f"请先确认 STM32 在线: http://{HOST}:{HTTP_PORT}/ping\n")
+        return
+
     print(f"正在连接 {HOST}:{PORT} ...\n")
     try:
         sock = socket.create_connection((HOST, PORT), timeout=5)
@@ -339,6 +572,8 @@ def connect():
 # ── Main menu ────────────────────────────────────────────────────────────────
 
 def main():
+    apply_config(parse_args())
+
     # Ensure the Windows command prompt can display UTF-8.
     if sys.platform == "win32":
         os.system("chcp 65001 >nul 2>&1")
@@ -346,10 +581,11 @@ def main():
     # The menu stays in the foreground; long-running interaction happens only
     # inside `connect`, which returns here after the socket closes.
     while True:
+        print(f"STM32: {HOST}:{HTTP_PORT} / UART {PORT} | Image server: {IMG_SERVER_HOST}:{IMG_SERVER_PORT}")
         print(MENU)
         choice = input("请选择: ").strip()
         if choice == "1":
-            ping()
+            health_check()
         elif choice == "2":
             get_power_state()
         elif choice == "3":
@@ -357,12 +593,18 @@ def main():
         elif choice == "4":
             set_power("ForceOff", "Power off")
         elif choice == "5":
-            connect()
+            force_reboot()
         elif choice == "6":
+            select_boot_image()
+        elif choice == "7":
+            boot_selected_image()
+        elif choice == "8":
+            connect()
+        elif choice == "9":
             print("再见！")
             sys.exit(0)
         else:
-            print("无效输入，请输入 1-6。\n")
+            print("无效输入，请输入 1-9。\n")
 
 
 if __name__ == "__main__":

@@ -17,13 +17,25 @@ use embassy_stm32::{Peri, gpio::{Level, Output, Speed}, peripherals::{PB3, PB4}}
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use embassy_time::Timer;
 
-pub static POWER_SIGNAL: Signal<ThreadModeRawMutex, bool> = Signal::new();
+pub static POWER_SIGNAL: Signal<ThreadModeRawMutex, PowerAction> = Signal::new();
 pub static POWER_STATE: AtomicBool = AtomicBool::new(true);
+
+/// Power-control operation requested by the management API.
+#[derive(Clone, Copy)]
+pub enum PowerAction {
+    On,
+    ForceOff,
+    ForceRestart,
+}
 
 /// Request a power-state change and notify the GPIO task.
 pub fn set_power_state(state: bool) {
-    POWER_STATE.store(state, Ordering::Relaxed);
-    POWER_SIGNAL.signal(state);
+    POWER_SIGNAL.signal(if state { PowerAction::On } else { PowerAction::ForceOff });
+}
+
+/// Request a power-control operation and notify the GPIO task.
+pub fn request_power_action(action: PowerAction) {
+    POWER_SIGNAL.signal(action);
 }
 
 /// Read the latest firmware power-state flag.
@@ -36,12 +48,17 @@ pub async fn power_task(mut power_control: PowerControl) -> ! {
     loop {
         // Serialize all power pulses through one task so PB3/PB4 are never
         // driven by concurrent request handlers.
-        let state = POWER_SIGNAL.wait().await;
-        POWER_STATE.store(state, Ordering::Relaxed);
-        if state {
-            power_control.power_on().await;
-        } else {
-            power_control.power_off().await;
+        let action = POWER_SIGNAL.wait().await;
+        match action {
+            PowerAction::On => {
+                power_control.power_on().await;
+            }
+            PowerAction::ForceOff => {
+                power_control.power_off().await;
+            }
+            PowerAction::ForceRestart => {
+                power_control.force_restart().await;
+            }
         }
     }
 }
@@ -76,6 +93,7 @@ impl PowerControl {
         self.power_on_pin.set_low();
         Timer::after_secs(3).await;
         self.power_on_pin.set_high();
+        POWER_STATE.store(true, Ordering::Relaxed);
         info!("Power on complete");
         defmt::flush();
     }
@@ -91,7 +109,27 @@ impl PowerControl {
         self.power_off_pin.set_low();
         Timer::after_secs(3).await;
         self.power_off_pin.set_high();
+        POWER_STATE.store(false, Ordering::Relaxed);
         info!("Power off complete");
+        defmt::flush();
+    }
+
+    /// Force a reboot by pulsing PB3 for force-off, then PB4 for power-on.
+    pub async fn force_restart(&mut self) {
+        info!("Force restart: asserting force-off pin PB3");
+        self.power_off_pin.set_low();
+        Timer::after_secs(3).await;
+        self.power_off_pin.set_high();
+
+        Timer::after_secs(1).await;
+
+        info!("Force restart: asserting power-on pin PB4");
+        self.power_on_pin.set_low();
+        Timer::after_secs(3).await;
+        self.power_on_pin.set_high();
+
+        POWER_STATE.store(true, Ordering::Relaxed);
+        info!("Force restart complete");
         defmt::flush();
     }
 }

@@ -104,7 +104,7 @@ async fn main(spawner: Spawner) {
 
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        info!("VNC Server waiting for connection on 192.168.10.2:5900 ...");
+        info!("VNC Server waiting for connection on 169.254.77.2:5900 ...");
         
         if let Err(e) = socket.accept(5900).await {
             error!("Accept error => {:?}", e);

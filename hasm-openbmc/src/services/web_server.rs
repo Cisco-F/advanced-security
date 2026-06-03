@@ -5,7 +5,7 @@
 //! - `/ping` for a simple connectivity check;
 //! - `/redfish/v1` and `/redfish/v1/Systems` for service discovery;
 //! - `/redfish/v1/Systems/1` for current power state;
-//! - `ComputerSystem.Reset` POST for power on and force-off requests.
+//! - `ComputerSystem.Reset` POST for power on, force-off, and force-restart requests.
 //!
 //! Request parsing is intentionally tiny. The board is used on an isolated lab
 //! network, and the Python console tool sends fixed requests. Avoiding a general
@@ -15,7 +15,7 @@ use defmt::*;
 use embassy_net::{Stack, tcp::TcpSocket};
 use {defmt_rtt as _, panic_probe as _};
 
-use crate::{services::power_control::{is_power_on, set_power_state}, utils::*};
+use crate::{services::power_control::{is_power_on, request_power_action, PowerAction}, utils::*};
 
 #[embassy_executor::task]
 pub async fn http_task(stack: Stack<'static>) {
@@ -91,11 +91,14 @@ pub async fn handle_http_request(socket: &mut embassy_net::tcp::TcpSocket<'_>) {
             // This substring check is enough for the controlled tooling and
             // avoids pulling in a JSON parser for firmware-side management.
             if req_str.contains("\"ResetType\":\"On\"") {
-                set_power_state(true);
+                request_power_action(PowerAction::On);
                 send_response(socket, 200, b"OK", b"Power On!").await;
             } else if req_str.contains("\"ResetType\":\"ForceOff\"") {
-                set_power_state(false);
+                request_power_action(PowerAction::ForceOff);
                 send_response(socket, 200, b"OK", b"Force Power Off!").await;
+            } else if req_str.contains("\"ResetType\":\"ForceRestart\"") {
+                request_power_action(PowerAction::ForceRestart);
+                send_response(socket, 200, b"OK", b"Force Restart!").await;
             } else {
                 send_response(socket, 404, b"Not Found", b"").await;
             }

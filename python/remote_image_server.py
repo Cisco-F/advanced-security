@@ -25,37 +25,167 @@
 # Error handling favors firmware visibility over HTTP sophistication. Bad ranges
 # return simple status codes, while valid ranges stream exactly the requested
 # bytes so the STM32 can fill SCSI READ(10) responses without guessing.
-"""Simple HTTP server to serve img/raspi_recover.img for STM32 testing.
+"""Simple HTTP server to serve a host-side boot image for STM32 testing.
 
 Features:
 - Serves full image at `/image` with support for `Range` requests.
 - Serves fixed-size 512-byte blocks at `/block/{lba}` (optional `?count=N`).
+- Lists and selects images through `/images` and `/images/select`.
 - Optional `--preload` to load the whole image into RAM for lower latency.
 
 Usage:
-    python tools/remote_image_server.py --host 192.168.10.1 --port 8000 --img img/raspi_recover.img --preload
+    python python/remote_image_server.py
+    python python/remote_image_server.py --host 169.254.77.1 --port 8000 --img img/raspi_recover.img --preload
 
 Requires: Python 3.8+ and aiohttp: `pip install aiohttp`
 """
 import argparse
 import asyncio
-import os
+import json
+from pathlib import Path
 from aiohttp import web
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+IMAGE_DIR = ROOT_DIR / "img"
+DEFAULT_IMAGE = IMAGE_DIR / "raspi_recover.img"
+IMAGE_EXTS = {".img", ".iso", ".raw"}
 
 
 def parse_args():
     # Defaults match the firmware constants and README quick-start instructions.
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default="192.168.10.1")
+    p.add_argument("--host", default="169.254.77.1")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--img", default="img/raspi_recover.img")
+    p.add_argument("--img-dir", default=str(IMAGE_DIR), help="Directory containing boot images")
+    p.add_argument("--img", default=None, help="Initial image path or name inside --img-dir")
     p.add_argument("--preload", action="store_true", help="Preload image into memory")
     return p.parse_args()
+
+
+def find_images(img_dir):
+    img_dir = Path(img_dir)
+    if not img_dir.exists():
+        raise FileNotFoundError(f"image directory not found: {img_dir}")
+    return sorted(
+        p.resolve() for p in img_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
+
+
+def resolve_initial_image(img_arg, images):
+    if not images:
+        raise SystemExit("no .img/.iso/.raw images found")
+
+    if img_arg:
+        requested = Path(img_arg)
+        if not requested.is_absolute():
+            requested = (ROOT_DIR / requested).resolve()
+        if requested in images:
+            return requested
+        for image in images:
+            if image.name == img_arg:
+                return image
+        raise SystemExit(f"initial image not found in image directory: {img_arg}")
+
+    default = DEFAULT_IMAGE.resolve()
+    if default in images:
+        return default
+    print(f"[server] auto-selected image: {images[0]}")
+    return images[0]
+
+
+def set_current_image(app, img_path):
+    img_path = Path(img_path).resolve()
+    if not img_path.exists():
+        raise FileNotFoundError(img_path)
+
+    app['img_path'] = img_path
+    app['img_size'] = img_path.stat().st_size
+    if app['preload']:
+        print(f"[server] preloading image: {img_path}")
+        with open(img_path, 'rb') as f:
+            app['img_mem'] = f.read()
+        print("[server] preload done, size", len(app['img_mem']))
+    else:
+        app.pop('img_mem', None)
+
+
+def image_payload(app):
+    images = app['images']
+    current = app['img_path']
+    current_index = next((i for i, image in enumerate(images, start=1) if image == current), None)
+    return {
+        "current_index": current_index,
+        "current": current.name,
+        "current_path": str(current),
+        "images": [
+            {
+                "index": idx,
+                "name": image.name,
+                "path": str(image),
+                "size": image.stat().st_size,
+                "active": image == current,
+            }
+            for idx, image in enumerate(images, start=1)
+        ],
+    }
+
+
+def refresh_images(app):
+    images = find_images(app['img_dir'])
+    if not images:
+        raise FileNotFoundError("no .img/.iso/.raw images found")
+    app['images'] = images
+    if app.get('img_path') not in images:
+        set_current_image(app, resolve_initial_image(None, images))
 
 
 async def handle_ping(request):
     # Lightweight endpoint for checking that the host server is reachable.
     return web.Response(text="OK")
+
+
+async def handle_images(request):
+    try:
+        refresh_images(request.app)
+    except FileNotFoundError as e:
+        return web.json_response({"error": str(e), "images": []}, status=404)
+    return web.json_response(image_payload(request.app))
+
+
+async def handle_select_image(request):
+    app = request.app
+    try:
+        refresh_images(app)
+    except FileNotFoundError as e:
+        return web.json_response({"error": str(e), "images": []}, status=404)
+
+    try:
+        body = await request.text()
+        payload = json.loads(body or "{}")
+    except json.JSONDecodeError:
+        return web.json_response({"error": "bad json"}, status=400)
+
+    images = app['images']
+    selected = None
+    if "index" in payload:
+        try:
+            index = int(payload["index"])
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad index"}, status=400)
+        if index < 1 or index > len(images):
+            return web.json_response({"error": "index out of range"}, status=400)
+        selected = images[index - 1]
+    elif "name" in payload:
+        selected = next((image for image in images if image.name == payload["name"]), None)
+        if selected is None:
+            return web.json_response({"error": "name not found"}, status=404)
+    else:
+        return web.json_response({"error": "index or name required"}, status=400)
+
+    set_current_image(app, selected)
+    print(f"[server] selected image: {selected}")
+    return web.json_response(image_payload(app))
 
 
 def http_range_to_slice(range_header, file_size):
@@ -90,6 +220,10 @@ def http_range_to_slice(range_header, file_size):
 async def handle_image(request):
     # Main firmware data path: SCSI sector reads arrive here as HTTP byte ranges.
     app = request.app
+    try:
+        refresh_images(app)
+    except FileNotFoundError as e:
+        return web.Response(status=404, text=str(e))
     img_path = app['img_path']
     size = app['img_size']
     data = app.get('img_mem')
@@ -155,6 +289,10 @@ async def handle_block(request):
     # current firmware uses `/image`, but `/block/{lba}` is handy when comparing
     # sector contents from a browser or curl.
     app = request.app
+    try:
+        refresh_images(app)
+    except FileNotFoundError as e:
+        return web.Response(status=404, text=str(e))
     img_path = app['img_path']
     size = app['img_size']
     data = app.get('img_mem')
@@ -190,26 +328,21 @@ async def handle_block(request):
         return web.Response(body=body, headers=headers)
 
 
-async def init_app(img_path, preload=False):
+async def init_app(img_dir, initial_img=None, preload=False):
     # Store image metadata in the aiohttp app so each request handler avoids
     # repeating stat calls and path validation.
     app = web.Application()
-    if not os.path.exists(img_path):
-        # Fail early so the STM32 does not see connection resets for a missing
-        # backing image.
-        raise SystemExit(f'image not found: {img_path}')
-    size = os.path.getsize(img_path)
-    app['img_path'] = img_path
-    app['img_size'] = size
-    if preload:
-        # Loading once is useful when the image is small enough and repeated boot
-        # attempts should not be affected by host filesystem cache behavior.
-        print('Preloading image into memory...')
-        with open(img_path, 'rb') as f:
-            app['img_mem'] = f.read()
-        print('Preload done, size', len(app['img_mem']))
+    app['img_dir'] = Path(img_dir)
+    app['preload'] = preload
+    try:
+        app['images'] = find_images(app['img_dir'])
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+    set_current_image(app, resolve_initial_image(initial_img, app['images']))
 
     app.router.add_get('/ping', handle_ping)
+    app.router.add_get('/images', handle_images)
+    app.router.add_post('/images/select', handle_select_image)
     # `/image` is the production firmware path; `/block` is a human-friendly
     # diagnostic path.
     app.router.add_get('/image', handle_image)
@@ -222,8 +355,9 @@ def main():
     args = parse_args()
     # aiohttp owns the event loop after `web.run_app`; initialization is kept in
     # an async helper so future startup checks can share the same loop style.
-    app = asyncio.run(init_app(args.img, preload=args.preload))
-    print(f'Serving {args.img} on http://{args.host}:{args.port} (preload={args.preload})')
+    app = asyncio.run(init_app(args.img_dir, initial_img=args.img, preload=args.preload))
+    print(f"Serving image directory {args.img_dir} on http://{args.host}:{args.port} (preload={args.preload})")
+    print(f"Current image: {app['img_path']}")
     web.run_app(app, host=args.host, port=args.port)
 
 
